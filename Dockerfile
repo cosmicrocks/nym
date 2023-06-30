@@ -39,10 +39,10 @@ COPY . .
 RUN make build-release
 
 # Stage 2: Final stage
-FROM ubuntu
+FROM debian:buster-slim
 
 RUN apt-get update && \
-    apt-get install -y libssl-dev && \
+    apt-get install -y libssl-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 #copy the compiled binaries from the builder stage
