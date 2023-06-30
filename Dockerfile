@@ -39,13 +39,11 @@ COPY . .
 RUN make build-release
 
 # Stage 2: Final stage
-FROM debian:buster-slim
+FROM ubuntu
 
 RUN apt-get update && \
     apt-get install -y libssl-dev && \
     rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 #copy the compiled binaries from the builder stage
 COPY --from=builder /usr/src/target/release/nym-client /usr/bin/nym-client
