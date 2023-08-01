@@ -14,6 +14,11 @@
 - [SOCKS Proxy (CLI)](quickstart/socks-proxy.md)
 - [NymConnect Beta (GUI)](quickstart/nymconnect-gui.md)
 
+# User Manuals
+
+- [NymConnect Monero](tutorials/monero.md)
+- [NymConnect Matrix](tutorials/matrix.md)
+
 # Integrations
 
 - [Integration Options](integrations/integration-options.md)
@@ -35,14 +40,13 @@
 # Community Resources
 
 - [Nym DevRel AMAs](community-resources/ama.md)
-- [Community Applications](community-resources/community-applications.md)
-- [Community Guides](community-resources/community-guides.md)
+- [Community Applications and Guides](community-resources/community-applications-and-guides.md)
 - [Change Service Grantee Information](info-request.md)
 - [Rewards FAQ](community-resources/rewards-faq.md)
---- 
+---
 
 # Misc.
 - [Glossary](glossary.md)
 - [Code of Conduct](coc.md)
 - [Licensing](licensing.md)
---- 
+---

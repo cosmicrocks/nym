@@ -2,11 +2,19 @@
 
 ## [Unreleased]
 
-## [v1.2.5] (2023-06-27)
+## [v1.2.6] (2023-07-18)
+
+- [wallet] bugfix: don't send funds for pledge decrease simulation ([#3676])
+
+[#3676]: https://github.com/nymtech/nym/pull/3676
+
+## [v1.2.5] (2023-07-04)
 
 - Wallet - add "Test my node" in the Node Settings and show its results ([#2314])
+- Move client wasm to Wallet directory ([#3606])
 
 [#2314]: https://github.com/nymtech/nym/issues/2314
+[#3606]: https://github.com/nymtech/nym/pull/3606
 
 ## [v1.2.4] (2023-06-06)
 
