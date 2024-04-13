@@ -54,7 +54,6 @@ COPY --from=builder /usr/src/target/release/nym-api /usr/bin/nym-api
 COPY --from=builder /usr/src/target/release/nym-network-requester /usr/bin/nym-network-requester
 COPY --from=builder /usr/src/target/release/nym-network-statistics /usr/bin/nym-network-statistics
 COPY --from=builder /usr/src/target/release/nym-cli /usr/bin/nym-cli
-COPY --from=builder /usr/src/target/release/nym-credential-client /usr/bin/nym-credential-client
 COPY --from=builder /usr/src/target/release/explorer-api /usr/bin/explorer-api
 
 #copy the compiled contracts from the builder stage
