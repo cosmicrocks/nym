@@ -1,5 +1,5 @@
 # Stage 1: Building the code
-FROM rust:1.69 as builder
+FROM rust:1.77 as builder
 
 # Install necessary packages for building the application and its dependencies (musl, gtk, etc.)
 RUN apt-get update && apt-get install -y \
