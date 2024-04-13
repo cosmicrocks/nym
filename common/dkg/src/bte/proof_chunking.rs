@@ -67,8 +67,7 @@ impl<'a> Instance<'a> {
     }
 }
 
-#[derive(Debug)]
-#[cfg_attr(test, derive(Clone, PartialEq, Eq))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofOfChunking {
     y0: G1Projective,
     bb: Vec<G1Projective>,
@@ -642,7 +641,6 @@ impl ProofOfChunking {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bte::Share;
     use crate::ChunkedShare;
 
     // limit number of nodes to some reasonable-ish value, as it significantly affects
@@ -838,7 +836,7 @@ mod tests {
         let share3 = chunks3.clone().try_into().unwrap();
 
         let shares = vec![share1, share2, share3];
-        let chunks = vec![chunks1, chunks2, chunks3];
+        let chunks = [chunks1, chunks2, chunks3];
 
         for (i, pk_i) in pks.iter().enumerate() {
             let mut ciphertext_chunk_i = Vec::with_capacity(NUM_CHUNKS);

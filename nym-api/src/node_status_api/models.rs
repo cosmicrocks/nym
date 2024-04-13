@@ -1,5 +1,5 @@
 // Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::node_status_api::utils::NodeUptimes;
 use crate::storage::models::NodeStatus;
@@ -21,7 +21,7 @@ use schemars::gen::SchemaGenerator;
 use schemars::schema::{InstanceType, Schema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
+
 use thiserror::Error;
 use time::OffsetDateTime;
 

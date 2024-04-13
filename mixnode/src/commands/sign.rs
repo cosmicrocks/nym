@@ -1,20 +1,15 @@
 // Copyright 2020-2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::commands::{try_load_current_config, validate_bech32_address_or_exit};
-use crate::node::MixNode;
 use anyhow::{bail, Result};
 use clap::{ArgGroup, Args};
+use log::error;
 use nym_bin_common::output_format::OutputFormat;
 use nym_crypto::asymmetric::identity;
+use nym_mixnode::node::helpers::load_identity_keys;
 use nym_types::helpers::ConsoleSigningOutput;
 use nym_validator_client::nyxd;
-use std::convert::TryFrom;
-
-#[cfg(feature = "cpucycles")]
-use tracing::error;
-
-use super::version_check;
 
 #[derive(Args, Clone)]
 #[clap(group(ArgGroup::new("sign").required(true).args(&["wallet_address", "text", "contract_msg"])))]
@@ -117,11 +112,6 @@ fn print_signed_contract_msg(
 pub(crate) fn execute(args: &Sign) -> anyhow::Result<()> {
     let config = try_load_current_config(&args.id)?;
 
-    if !version_check(&config) {
-        error!("failed the local version check");
-        bail!("failed the local version check")
-    }
-
     let signed_target = match SignedTarget::try_from(args.clone()) {
         Ok(s) => s,
         Err(err) => {
@@ -129,7 +119,7 @@ pub(crate) fn execute(args: &Sign) -> anyhow::Result<()> {
             bail!(err);
         }
     };
-    let identity_keypair = MixNode::load_identity_keys(&config);
+    let identity_keypair = load_identity_keys(&config)?;
 
     match signed_target {
         SignedTarget::Text(text) => {

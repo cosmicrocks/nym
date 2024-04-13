@@ -1,12 +1,13 @@
 // Copyright 2022 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::epoch_operations::RewardedSetUpdater;
 use cosmwasm_std::{Decimal, Fraction};
 use nym_mixnet_contract_common::reward_params::Performance;
 use nym_mixnet_contract_common::{ExecuteMsg, Interval, MixId};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct MixnodeWithPerformance {
     pub(crate) mix_id: MixId,
 

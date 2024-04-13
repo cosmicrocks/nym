@@ -4,7 +4,7 @@
 use nym_sphinx_addressing::nodes::{NymNodeRoutingAddress, NymNodeRoutingAddressError};
 use nym_sphinx_params::{PacketSize, PacketType};
 use nym_sphinx_types::{NymPacket, NymPacketError};
-use std::convert::TryFrom;
+
 use std::fmt::{self, Debug, Formatter};
 use thiserror::Error;
 
@@ -106,8 +106,8 @@ impl MixPacket {
 
     pub fn into_bytes(self) -> Result<Vec<u8>, MixPacketFormattingError> {
         Ok(std::iter::once(self.packet_type as u8)
-            .chain(self.next_hop.as_bytes().into_iter())
-            .chain(self.packet.to_bytes()?.into_iter())
+            .chain(self.next_hop.as_bytes())
+            .chain(self.packet.to_bytes()?)
             .collect())
     }
 }

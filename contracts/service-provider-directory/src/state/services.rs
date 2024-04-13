@@ -88,6 +88,8 @@ pub fn load_nym_address(store: &dyn Storage, nym_address: NymAddress) -> Result<
 pub struct PagedLoad {
     pub services: Vec<Service>,
     pub limit: usize,
+
+    /// Field indicating paging information for the following queries if the caller wishes to get further entries.
     pub start_next_after: Option<ServiceId>,
 }
 
@@ -125,12 +127,9 @@ mod tests {
     };
     use rstest::rstest;
 
-    use crate::{
-        test_helpers::{
-            fixture::{service_fixture, service_fixture_with_address},
-            transactions::instantiate_test_contract,
-        },
-        SpContractError,
+    use crate::test_helpers::{
+        fixture::{service_fixture, service_fixture_with_address},
+        transactions::instantiate_test_contract,
     };
 
     use super::*;

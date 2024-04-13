@@ -3,7 +3,7 @@
 
 use crate::ChunkingError;
 use nym_sphinx_params::{SerializedFragmentIdentifier, FRAG_ID_LEN};
-use std::convert::TryInto;
+
 use std::fmt::{self, Debug, Formatter};
 
 // Personal reflection: In hindsight I've spent too much time on relatively too little
@@ -204,7 +204,7 @@ impl Fragment {
         self.header
             .to_bytes()
             .into_iter()
-            .chain(self.payload.into_iter())
+            .chain(self.payload)
             .collect()
     }
 

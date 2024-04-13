@@ -1,5 +1,5 @@
 // Copyright 2022 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 // there is couple of reasons for putting this in a separate module:
 // 1. I didn't feel it fit well in nym contract "cache". It seems like purpose of cache is to just keep updating local data
@@ -58,9 +58,11 @@ impl RewardedSetUpdater {
 
     // This is where the epoch gets advanced, and all epoch related transactions originate
     /// Upon each epoch having finished the following actions are executed by this nym-api:
-    /// 1. it queries the mixnet contract to check the current `EpochState` in order to figure out whether
+    /// 1. it computes the rewards for each node using the ephemera channel for the epoch that
+    ///    ended
+    /// 2. it queries the mixnet contract to check the current `EpochState` in order to figure out whether
     ///     a different nym-api has already started epoch transition (not yet applicable)
-    /// 2. it sends a `BeginEpochTransition` message to the mixnet contract causing the following to happen:
+    /// 3. it sends a `BeginEpochTransition` message to the mixnet contract causing the following to happen:
     ///     - if successful, the address of the this validator is going to be saved as being responsible for progressing this epoch.
     ///     What it means in practice is that once we have multiple instances of nym-api running,
     ///     only this one will try to perform the rest of the actions. It will also allow it to
@@ -70,21 +72,24 @@ impl RewardedSetUpdater {
     ///     until that is done.
     ///     - ability to send transactions (by other users) that get resolved once given epoch/interval rolls over,
     ///     such as `BondMixnode` or `DelegateToMixnode` will temporarily be frozen until the entire procedure is finished.
-    /// 3. it obtains the current rewarded set and for each node in there (**SORTED BY MIX_ID!!**),
+    /// 4. it obtains the current rewarded set and for each node in there (**SORTED BY MIX_ID!!**),
     ///    it sends (in a single batch) `RewardMixnode` message with the measured performance.
     ///    Once the final message gets executed, the mixnet contract automatically transitions
     ///    the state to `ReconcilingEvents`.
-    /// 4. it obtains the number of pending epoch and interval events and repeatedly sends
+    /// 5. it obtains the number of pending epoch and interval events and repeatedly sends
     ///    `ReconcileEpochEvents` transaction until all of them are resolved.
     ///    At this point the mixnet contract automatically transitions the state to `AdvancingEpoch`.
-    /// 5. it obtains the list of all nodes on the network and pseudorandomly (but weighted by total stake)
+    /// 6. it obtains the list of all nodes on the network and pseudorandomly (but weighted by total stake)
     ///    determines the new rewarded set. It then assigns layers to the provided nodes taking
     ///    family information into consideration. Finally it sends `AdvanceCurrentEpoch` message
     ///    containing the set and layer information thus rolling over the epoch and changing the state
     ///    to `InProgress`.
-    /// 6. it purges old (older than 48h) measurement data
-    /// 7. the whole process repeats once the new epoch finishes
-    async fn perform_epoch_operations(&self, interval: Interval) -> Result<(), RewardingError> {
+    /// 7. it purges old (older than 48h) measurement data
+    /// 8. the whole process repeats once the new epoch finishes
+    async fn perform_epoch_operations(&mut self, interval: Interval) -> Result<(), RewardingError> {
+        let mut rewards = self.nodes_to_reward(interval).await;
+        rewards.sort_by_key(|a| a.mix_id);
+
         log::info!("The current epoch has finished.");
         log::info!(
             "Interval id: {}, epoch id: {} (absolute epoch id: {})",
@@ -128,7 +133,7 @@ impl RewardedSetUpdater {
 
         // Reward all the nodes in the still current, soon to be previous rewarded set
         log::info!("Rewarding the current rewarded set...");
-        self.reward_current_rewarded_set(interval).await?;
+        self.reward_current_rewarded_set(&rewards, interval).await?;
 
         // note: those operations don't really have to be atomic, so it's fine to send them
         // as separate transactions

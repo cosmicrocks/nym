@@ -11,6 +11,7 @@ use nym_mixnet_contract_common::{ExecuteMsg, Gateway, MixId, MixNode};
 use nym_mixnet_contract_common::{GatewayConfigUpdate, MixNodeConfigUpdate};
 use nym_types::currency::DecCoin;
 use nym_types::mixnode::MixNodeCostParams;
+use nym_validator_client::nyxd::contract_traits::NymContractsProvider;
 
 async fn simulate_mixnet_operation(
     msg: ExecuteMsg,
@@ -28,13 +29,16 @@ async fn simulate_mixnet_operation(
     };
 
     let client = guard.current_client()?;
-    let mixnet_contract = client.nyxd.mixnet_contract_address();
+    let mixnet_contract = client
+        .nyxd
+        .mixnet_contract_address()
+        .expect("mixnet contract address is not available");
 
     let msg = client
         .nyxd
         .wrap_contract_execute_message(mixnet_contract, &msg, funds)?;
 
-    let result = client.nyxd.simulate(vec![msg]).await?;
+    let result = client.nyxd.simulate(vec![msg], "").await?;
     guard.create_detailed_fee(result)
 }
 

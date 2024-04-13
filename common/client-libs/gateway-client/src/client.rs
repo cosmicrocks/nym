@@ -1,4 +1,4 @@
-// Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
+// Copyright 2021-2024 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::error::GatewayClientError;
@@ -6,44 +6,80 @@ use crate::packet_router::PacketRouter;
 pub use crate::packet_router::{
     AcknowledgementReceiver, AcknowledgementSender, MixnetMessageReceiver, MixnetMessageSender,
 };
-use crate::socket_state::{PartiallyDelegated, SocketState};
+use crate::socket_state::{ws_fd, PartiallyDelegated, SocketState};
+use crate::traits::GatewayPacketRouter;
 use crate::{cleanup_socket_message, try_decrypt_binary_message};
 use futures::{SinkExt, StreamExt};
 use log::*;
 use nym_bandwidth_controller::BandwidthController;
-use nym_coconut_interface::Credential;
 use nym_credential_storage::ephemeral_storage::EphemeralStorage as EphemeralCredentialStorage;
 use nym_credential_storage::storage::Storage as CredentialStorage;
+use nym_credentials::CredentialSpendingData;
 use nym_crypto::asymmetric::identity;
 use nym_gateway_requests::authentication::encrypted_address::EncryptedAddressBytes;
 use nym_gateway_requests::iv::IV;
 use nym_gateway_requests::registration::handshake::{client_handshake, SharedKeys};
-use nym_gateway_requests::{BinaryRequest, ClientControlRequest, ServerResponse, PROTOCOL_VERSION};
+use nym_gateway_requests::{
+    BinaryRequest, ClientControlRequest, ServerResponse, CREDENTIAL_UPDATE_V2_PROTOCOL_VERSION,
+    CURRENT_PROTOCOL_VERSION,
+};
 use nym_network_defaults::{REMAINING_BANDWIDTH_THRESHOLD, TOKENS_TO_BURN};
 use nym_sphinx::forwarding::packet::MixPacket;
 use nym_task::TaskClient;
+use nym_validator_client::nyxd::contract_traits::DkgQueryClient;
 use rand::rngs::OsRng;
-use std::convert::TryFrom;
+
 use std::sync::Arc;
 use std::time::Duration;
 use tungstenite::protocol::Message;
+use url::Url;
 
+#[cfg(unix)]
+use std::os::fd::RawFd;
 #[cfg(not(target_arch = "wasm32"))]
-use nym_validator_client::nyxd::traits::DkgQueryClient;
+use tokio::time::sleep;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::connect_async;
 
-#[cfg(target_arch = "wasm32")]
-use nym_bandwidth_controller::wasm_mockups::DkgQueryClient;
-#[cfg(target_arch = "wasm32")]
-use wasm_timer;
+#[cfg(not(unix))]
+use std::os::raw::c_int as RawFd;
 #[cfg(target_arch = "wasm32")]
 use wasm_utils::websocket::JSWebsocket;
+#[cfg(target_arch = "wasm32")]
+use wasmtimer::tokio::sleep;
 
+// Set this to a high value for now, so that we don't risk sporadic timeouts that might cause
+// bought bandwidth tokens to not have time to be spent; Once we remove the gateway from the
+// bandwidth bridging protocol, we can come back to a smaller timeout value
+const DEFAULT_GATEWAY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_RECONNECTION_ATTEMPTS: usize = 10;
 const DEFAULT_RECONNECTION_BACKOFF: Duration = Duration::from_secs(5);
 
-pub struct GatewayClient<C, St> {
+pub struct GatewayConfig {
+    pub gateway_identity: identity::PublicKey,
+
+    // currently a dead field
+    pub gateway_owner: Option<String>,
+
+    pub gateway_listener: String,
+}
+
+impl GatewayConfig {
+    pub fn new(
+        gateway_identity: identity::PublicKey,
+        gateway_owner: Option<String>,
+        gateway_listener: String,
+    ) -> Self {
+        GatewayConfig {
+            gateway_identity,
+            gateway_owner,
+            gateway_listener,
+        }
+    }
+}
+
+// TODO: this should be refactored into a state machine that keeps track of its authentication state
+pub struct GatewayClient<C, St = EphemeralCredentialStorage> {
     authenticated: bool,
     disabled_credentials_mode: bool,
     bandwidth_remaining: i64,
@@ -65,22 +101,20 @@ pub struct GatewayClient<C, St> {
     /// Delay between each subsequent reconnection attempt.
     reconnection_backoff: Duration,
 
+    // currently unused (but populated)
+    negotiated_protocol: Option<u8>,
+
     /// Listen to shutdown messages.
     shutdown: TaskClient,
 }
 
 impl<C, St> GatewayClient<C, St> {
-    // TODO: put it all in a Config struct
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        gateway_address: String,
+        config: GatewayConfig,
         local_identity: Arc<identity::KeyPair>,
-        gateway_identity: identity::PublicKey,
         // TODO: make it mandatory. if you don't want to pass it, use `new_init`
         shared_key: Option<Arc<SharedKeys>>,
-        mixnet_message_sender: MixnetMessageSender,
-        ack_sender: AcknowledgementSender,
-        response_timeout_duration: Duration,
+        packet_router: PacketRouter,
         bandwidth_controller: Option<BandwidthController<C, St>>,
         shutdown: TaskClient,
     ) -> Self {
@@ -88,40 +122,62 @@ impl<C, St> GatewayClient<C, St> {
             authenticated: false,
             disabled_credentials_mode: true,
             bandwidth_remaining: 0,
-            gateway_address,
-            gateway_identity,
+            gateway_address: config.gateway_listener,
+            gateway_identity: config.gateway_identity,
             local_identity,
             shared_key,
             connection: SocketState::NotConnected,
-            packet_router: PacketRouter::new(ack_sender, mixnet_message_sender, shutdown.clone()),
-            response_timeout_duration,
+            packet_router,
+            response_timeout_duration: DEFAULT_GATEWAY_RESPONSE_TIMEOUT,
             bandwidth_controller,
             should_reconnect_on_failure: true,
             reconnection_attempts: DEFAULT_RECONNECTION_ATTEMPTS,
             reconnection_backoff: DEFAULT_RECONNECTION_BACKOFF,
+            negotiated_protocol: None,
             shutdown,
         }
     }
 
-    pub fn set_disabled_credentials_mode(&mut self, disabled_credentials_mode: bool) {
+    #[must_use]
+    pub fn with_disabled_credentials_mode(mut self, disabled_credentials_mode: bool) -> Self {
         self.disabled_credentials_mode = disabled_credentials_mode;
+        self
     }
 
-    // TODO: later convert into proper builder methods
-    pub fn with_reconnection_on_failure(&mut self, should_reconnect_on_failure: bool) {
-        self.should_reconnect_on_failure = should_reconnect_on_failure
+    #[must_use]
+    pub fn with_reconnection_on_failure(mut self, should_reconnect_on_failure: bool) -> Self {
+        self.should_reconnect_on_failure = should_reconnect_on_failure;
+        self
     }
 
-    pub fn with_reconnection_attempts(&mut self, reconnection_attempts: usize) {
-        self.reconnection_attempts = reconnection_attempts
+    #[must_use]
+    pub fn with_response_timeout(mut self, response_timeout_duration: Duration) -> Self {
+        self.response_timeout_duration = response_timeout_duration;
+        self
     }
 
-    pub fn with_reconnection_backoff(&mut self, backoff: Duration) {
-        self.reconnection_backoff = backoff
+    #[must_use]
+    pub fn with_reconnection_attempts(mut self, reconnection_attempts: usize) -> Self {
+        self.reconnection_attempts = reconnection_attempts;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reconnection_backoff(mut self, backoff: Duration) -> Self {
+        self.reconnection_backoff = backoff;
+        self
     }
 
     pub fn gateway_identity(&self) -> identity::PublicKey {
         self.gateway_identity
+    }
+
+    pub fn ws_fd(&self) -> Option<RawFd> {
+        match &self.connection {
+            SocketState::Available(conn) => ws_fd(conn.as_ref()),
+            SocketState::PartiallyDelegated(conn) => conn.ws_fd(),
+            _ => None,
+        }
     }
 
     pub fn remaining_bandwidth(&self) -> i64 {
@@ -142,8 +198,8 @@ impl<C, St> GatewayClient<C, St> {
     #[cfg(target_arch = "wasm32")]
     async fn _close_connection(&mut self) -> Result<(), GatewayClientError> {
         match std::mem::replace(&mut self.connection, SocketState::NotConnected) {
-            SocketState::Available(mut socket) => {
-                (*socket).close(None).await;
+            SocketState::Available(socket) => {
+                (*socket).close(None, None).await?;
                 Ok(())
             }
             SocketState::PartiallyDelegated(_) => {
@@ -176,7 +232,9 @@ impl<C, St> GatewayClient<C, St> {
     pub async fn establish_connection(&mut self) -> Result<(), GatewayClientError> {
         let ws_stream = match JSWebsocket::new(&self.gateway_address) {
             Ok(ws_stream) => ws_stream,
-            Err(e) => return Err(GatewayClientError::NetworkErrorWasm(e)),
+            Err(e) => {
+                return Err(GatewayClientError::NetworkErrorWasm(e));
+            }
         };
 
         self.connection = SocketState::Available(Box::new(ws_stream));
@@ -197,16 +255,7 @@ impl<C, St> GatewayClient<C, St> {
                 return Ok(());
             }
 
-            #[cfg(not(target_arch = "wasm32"))]
-            tokio::time::sleep(self.reconnection_backoff).await;
-
-            #[cfg(target_arch = "wasm32")]
-            if let Err(err) = wasm_timer::Delay::new(self.reconnection_backoff).await {
-                error!(
-                    "the timer has gone away while in reconnection backoff! - {}",
-                    err
-                );
-            }
+            sleep(self.reconnection_backoff).await;
         }
 
         // final attempt (done separately to be able to return a proper error)
@@ -235,15 +284,8 @@ impl<C, St> GatewayClient<C, St> {
             _ => return Err(GatewayClientError::ConnectionInInvalidState),
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let timeout = tokio::time::sleep(self.response_timeout_duration);
-        #[cfg(not(target_arch = "wasm32"))]
+        let timeout = sleep(self.response_timeout_duration);
         tokio::pin!(timeout);
-
-        // technically the `wasm_timer` also works outside wasm, but unless required,
-        // I really prefer to just stick to tokio
-        #[cfg(target_arch = "wasm32")]
-        let mut timeout = wasm_timer::Delay::new(self.response_timeout_duration);
 
         loop {
             tokio::select! {
@@ -368,6 +410,8 @@ impl<C, St> GatewayClient<C, St> {
         &self,
         gateway_protocol: Option<u8>,
     ) -> Result<(), GatewayClientError> {
+        debug!("gateway protocol: {gateway_protocol:?}, ours: {CURRENT_PROTOCOL_VERSION}");
+
         // right now there are no failure cases here, but this might change in the future
         match gateway_protocol {
             None => {
@@ -375,17 +419,17 @@ impl<C, St> GatewayClient<C, St> {
                 // note: in +1.2.0 we will have to return a hard error here
                 Ok(())
             }
-            Some(v) if v != PROTOCOL_VERSION => {
+            Some(v) if v > CURRENT_PROTOCOL_VERSION => {
                 let err = GatewayClientError::IncompatibleProtocol {
                     gateway: Some(v),
-                    current: PROTOCOL_VERSION,
+                    current: CURRENT_PROTOCOL_VERSION,
                 };
                 error!("{err}");
                 Err(err)
             }
 
             Some(_) => {
-                info!("the gateway is using exactly the same protocol version as we are. We're good to continue!");
+                info!("the gateway is using exactly the same (or older) protocol version as we are. We're good to continue!");
                 Ok(())
             }
         }
@@ -409,6 +453,7 @@ impl<C, St> GatewayClient<C, St> {
                 ws_stream,
                 self.local_identity.as_ref(),
                 self.gateway_identity,
+                !self.disabled_credentials_mode,
             )
             .await
             .map_err(GatewayClientError::RegistrationFailure),
@@ -431,6 +476,10 @@ impl<C, St> GatewayClient<C, St> {
         if self.authenticated {
             self.shared_key = Some(Arc::new(shared_key));
         }
+
+        // populate the negotiated protocol for future uses
+        self.negotiated_protocol = gateway_protocol;
+
         Ok(())
     }
 
@@ -461,8 +510,13 @@ impl<C, St> GatewayClient<C, St> {
             .derive_destination_address();
         let encrypted_address = EncryptedAddressBytes::new(&self_address, shared_key, &iv);
 
-        let msg =
-            ClientControlRequest::new_authenticate(self_address, encrypted_address, iv).into();
+        let msg = ClientControlRequest::new_authenticate(
+            self_address,
+            encrypted_address,
+            iv,
+            !self.disabled_credentials_mode,
+        )
+        .into();
 
         match self.send_websocket_message(msg).await? {
             ServerResponse::Authenticate {
@@ -473,6 +527,7 @@ impl<C, St> GatewayClient<C, St> {
                 self.check_gateway_protocol(protocol_version)?;
                 self.authenticated = status;
                 self.bandwidth_remaining = bandwidth_remaining;
+                self.negotiated_protocol = protocol_version;
                 Ok(())
             }
             ServerResponse::Error { message } => Err(GatewayClientError::GatewayError(message)),
@@ -484,6 +539,14 @@ impl<C, St> GatewayClient<C, St> {
     pub async fn perform_initial_authentication(
         &mut self,
     ) -> Result<Arc<SharedKeys>, GatewayClientError> {
+        if self.authenticated {
+            return if let Some(shared_key) = &self.shared_key {
+                Ok(Arc::clone(shared_key))
+            } else {
+                Err(GatewayClientError::AuthenticationFailure)
+            };
+        }
+
         if self.shared_key.is_some() {
             self.authenticate(None).await?;
         } else {
@@ -499,13 +562,13 @@ impl<C, St> GatewayClient<C, St> {
 
     async fn claim_coconut_bandwidth(
         &mut self,
-        credential: Credential,
+        credential: CredentialSpendingData,
     ) -> Result<(), GatewayClientError> {
         let mut rng = OsRng;
         let iv = IV::new_random(&mut rng);
 
-        let msg = ClientControlRequest::new_enc_coconut_bandwidth_credential(
-            &credential,
+        let msg = ClientControlRequest::new_enc_coconut_bandwidth_credential_v2(
+            credential,
             self.shared_key.as_ref().unwrap(),
             iv,
         )
@@ -551,18 +614,33 @@ impl<C, St> GatewayClient<C, St> {
             return self.try_claim_testnet_bandwidth().await;
         }
 
-        let (credential, credential_id) = self
+        let Some(gateway_protocol) = self.negotiated_protocol else {
+            return Err(GatewayClientError::OutdatedGatewayCredentialVersion {
+                negotiated_protocol: None,
+            });
+        };
+
+        if gateway_protocol < CREDENTIAL_UPDATE_V2_PROTOCOL_VERSION {
+            return Err(GatewayClientError::OutdatedGatewayCredentialVersion {
+                negotiated_protocol: Some(gateway_protocol),
+            });
+        }
+
+        let gateway_id = self.gateway_identity().to_base58_string();
+
+        let prepared_credential = self
             .bandwidth_controller
             .as_ref()
             .unwrap()
-            .prepare_coconut_credential()
+            .prepare_bandwidth_credential(&gateway_id)
             .await?;
 
-        self.claim_coconut_bandwidth(credential).await?;
+        self.claim_coconut_bandwidth(prepared_credential.data)
+            .await?;
         self.bandwidth_controller
             .as_ref()
             .unwrap()
-            .consume_credential(credential_id)
+            .consume_credential(prepared_credential.credential_id, &gateway_id)
             .await?;
 
         Ok(())
@@ -768,14 +846,19 @@ impl<C, St> GatewayClient<C, St> {
     }
 }
 
-impl<C> GatewayClient<C, EphemeralCredentialStorage> {
+// type alias for an ease of use
+pub type InitGatewayClient = GatewayClient<InitOnly>;
+
+pub struct InitOnly;
+
+impl GatewayClient<InitOnly, EphemeralCredentialStorage> {
     // for initialisation we do not need credential storage. Though it's still a bit weird we have to set the generic...
     pub fn new_init(
-        gateway_address: String,
+        gateway_listener: Url,
         gateway_identity: identity::PublicKey,
         local_identity: Arc<identity::KeyPair>,
-        response_timeout_duration: Duration,
     ) -> Self {
+        log::trace!("Initialising gateway client");
         use futures::channel::mpsc;
 
         // note: this packet_router is completely invalid in normal circumstances, but "works"
@@ -785,21 +868,54 @@ impl<C> GatewayClient<C, EphemeralCredentialStorage> {
         let shutdown = TaskClient::dummy();
         let packet_router = PacketRouter::new(ack_tx, mix_tx, shutdown.clone());
 
-        GatewayClient::<C, EphemeralCredentialStorage> {
+        GatewayClient {
             authenticated: false,
             disabled_credentials_mode: true,
             bandwidth_remaining: 0,
-            gateway_address,
+            gateway_address: gateway_listener.to_string(),
             gateway_identity,
             local_identity,
             shared_key: None,
             connection: SocketState::NotConnected,
             packet_router,
-            response_timeout_duration,
+            response_timeout_duration: DEFAULT_GATEWAY_RESPONSE_TIMEOUT,
             bandwidth_controller: None,
             should_reconnect_on_failure: false,
             reconnection_attempts: DEFAULT_RECONNECTION_ATTEMPTS,
             reconnection_backoff: DEFAULT_RECONNECTION_BACKOFF,
+            negotiated_protocol: None,
+            shutdown,
+        }
+    }
+
+    pub fn upgrade<C, St>(
+        self,
+        packet_router: PacketRouter,
+        bandwidth_controller: Option<BandwidthController<C, St>>,
+        shutdown: TaskClient,
+    ) -> GatewayClient<C, St> {
+        // invariants that can't be broken
+        // (unless somebody decided to expose some field that wasn't meant to be exposed)
+        assert!(self.authenticated);
+        assert!(self.connection.is_available());
+        assert!(self.shared_key.is_some());
+
+        GatewayClient {
+            authenticated: self.authenticated,
+            disabled_credentials_mode: self.disabled_credentials_mode,
+            bandwidth_remaining: self.bandwidth_remaining,
+            gateway_address: self.gateway_address,
+            gateway_identity: self.gateway_identity,
+            local_identity: self.local_identity,
+            shared_key: self.shared_key,
+            connection: self.connection,
+            packet_router,
+            response_timeout_duration: self.response_timeout_duration,
+            bandwidth_controller,
+            should_reconnect_on_failure: self.should_reconnect_on_failure,
+            reconnection_attempts: self.reconnection_attempts,
+            reconnection_backoff: self.reconnection_backoff,
+            negotiated_protocol: self.negotiated_protocol,
             shutdown,
         }
     }

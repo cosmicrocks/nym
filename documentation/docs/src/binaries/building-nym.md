@@ -8,7 +8,7 @@ Nym has two main codebases:
 - the [Nym platform](https://github.com/nymtech/nym), written in Rust. This contains all of our code _except_ for the validators.
 - the [Nym validators](https://github.com/nymtech/nyxd), written in Go.
 
-> This page details how to build the main Nym platform code. **If you want to build and run a validator, [go here](../nodes/validator-setup.md) instead.**
+> This page details how to build the main Nym platform code. **If you want to build and run a validator, [go here](../nodes/validator.md) instead.**
 
 ## Prerequisites
 - Debian/Ubuntu: `pkg-config`, `build-essential`, `libssl-dev`, `curl`, `jq`, `git`
@@ -39,7 +39,7 @@ If you really don't want to use the shell script installer, the [Rust installati
 ## Download and build Nym binaries
 The following commands will compile binaries into the `nym/target/release` directory:
 
-```
+```sh
 rustup update
 git clone https://github.com/nymtech/nym.git
 cd nym
@@ -47,20 +47,22 @@ cd nym
 git reset --hard # in case you made any changes on your branch
 git pull # in case you've checked it out before
 
-git checkout release/{{platform_release_version}} # checkout to the latest release branch: `develop` will most likely be incompatible with deployed public networks
+git checkout master # master branch has the latest release version: `develop` will most likely be incompatible with deployed public networks
 
 cargo build --release # build your binaries with **mainnet** configuration
-NETWORK=sandbox cargo build --release # build your binaries with **sandbox** configuration
 ```
 
 Quite a bit of stuff gets built. The key working parts are:
 
-* [mix node](../nodes/mix-node-setup.md): `nym-mixnode`
-* [gateway node](../nodes/gateway-setup.md): `nym-gateway`
+* [mix node](../nodes/mixnode.md): `nym-mixnode`
+* [gateway node](../nodes/gateway.md): `nym-gateway`
 * [websocket client](../clients/websocket-client.md): `nym-client`
 * [socks5 client](../clients/socks5-client.md): `nym-socks5-client`
-* [network requester](../nodes/network-requester-setup.md): `nym-network-requester`
+* [network requester](../nodes/network-requester.md): `nym-network-requester`
 * [nym-cli tool](../tools/nym-cli.md): `nym-cli`
+* [nym-api](https://nymtech.net/operators/nodes/nym-api.html): `nym-api`
+
+[//]: # (* [nymvisor]&#40;https://nymtech.net/operators/nodes/nymvisor-upgrade.html&#41;: `nymvisor`)
 
 The repository also contains Typescript applications which aren't built in this process. These can be built by following the instructions on their respective docs pages.
 * [Nym Wallet](../wallet/desktop-wallet.md)

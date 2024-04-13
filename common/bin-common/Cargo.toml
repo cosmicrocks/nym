@@ -8,13 +8,14 @@ license = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-atty = "0.2"
-clap = { version = "4.0", features = ["derive"] }
+const-str = "0.5.6"
+clap = { workspace = true, features = ["derive"] }
 clap_complete = "4.0"
 clap_complete_fig = "4.0"
 log = { workspace = true }
 pretty_env_logger = "0.4.0"
 semver = "0.11"
+schemars = { workspace = true, features = ["preserve_order"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 
@@ -29,22 +30,27 @@ opentelemetry-jaeger = { version = "0.18.0", optional = true, features = [
     "isahc_collector_client",
 ] }
 tracing-opentelemetry = { version = "0.19.0", optional = true }
+utoipa = { workspace = true, optional = true }
 opentelemetry = { version = "0.19.0", optional = true, features = ["rt-tokio"] }
 
 
 [build-dependencies]
-vergen = { version = "=7.4.3", default-features = false, features = [
+vergen = { version = "=8.2.6", default-features = false, features = [
     "build",
     "git",
+    "gitcl",
     "rustc",
     "cargo",
 ] }
 
 [features]
 default = []
+openapi = ["utoipa"]
 output_format = ["serde_json"]
+bin_info_schema = ["schemars"]
+basic_tracing = ["tracing-subscriber"]
 tracing = [
-    "tracing-subscriber",
+    "basic_tracing",
     "tracing-tree",
     "opentelemetry-jaeger",
     "tracing-opentelemetry",

@@ -201,6 +201,17 @@ impl<'a> From<&'a PrivateKey> for PublicKey {
 }
 
 impl PrivateKey {
+    #[cfg(feature = "rand")]
+    pub fn new<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
+        let x25519_secret = x25519_dalek::StaticSecret::new(rng);
+
+        PrivateKey(x25519_secret)
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        self.into()
+    }
+
     pub fn to_bytes(&self) -> [u8; PRIVATE_KEY_SIZE] {
         self.0.to_bytes()
     }
@@ -368,5 +379,20 @@ mod sphinx_key_conversion {
             assert_eq!(private_bytes, recovered_sphinx_private.to_bytes());
             assert_eq!(public_bytes, recovered_sphinx_public.as_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    fn assert_zeroize<T: Zeroize>() {}
+
+    #[test]
+    fn private_key_is_zeroized() {
+        assert_zeroize::<PrivateKey>();
+        assert_zeroize_on_drop::<PrivateKey>();
     }
 }

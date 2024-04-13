@@ -1,43 +1,51 @@
-// Copyright 2022 - Nym Technologies SA <contact@nymtech.net>
+// Copyright 2022-2023 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::client::mix_traffic::transceiver::ErasedGatewayError;
 use nym_crypto::asymmetric::identity::Ed25519RecoveryError;
 use nym_gateway_client::error::GatewayClientError;
 use nym_topology::gateway::GatewayConversionError;
 use nym_topology::NymTopologyError;
 use nym_validator_client::ValidatorClientError;
 use std::error::Error;
+use std::path::PathBuf;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientCoreError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("Gateway client error: {0}")]
-    GatewayClientError(#[from] GatewayClientError),
+    #[error("gateway client error ({gateway_id}): {source}")]
+    GatewayClientError {
+        gateway_id: String,
+        source: GatewayClientError,
+    },
 
-    #[error("Ed25519 error: {0}")]
+    #[error("custom gateway client error: {source}")]
+    ErasedGatewayClientError {
+        #[from]
+        source: ErasedGatewayError,
+    },
+
+    #[error("ed25519 error: {0}")]
     Ed25519RecoveryError(#[from] Ed25519RecoveryError),
 
-    #[error("Validator client error: {0}")]
+    #[error("validator client error: {0}")]
     ValidatorClientError(#[from] ValidatorClientError),
 
-    #[error("No gateway with id: {0}")]
+    #[error("no gateway with id: {0}")]
     NoGatewayWithId(String),
 
-    #[error("No gateways on network")]
+    #[error("no gateways on network")]
     NoGatewaysOnNetwork,
 
-    #[error("Failed to setup gateway")]
-    FailedToSetupGateway,
+    #[error("there are no more new gateways on the network - it seems this client has already registered with all nodes it could have")]
+    NoNewGatewaysAvailable,
 
-    #[error("List of nym apis is empty")]
+    #[error("list of nym apis is empty")]
     ListOfNymApisIsEmpty,
 
-    #[error("Could not load existing gateway configuration: {0}")]
-    CouldNotLoadExistingGatewayConfiguration(std::io::Error),
-
-    #[error("The current network topology seem to be insufficient to route any packets through")]
+    #[error("the current network topology seem to be insufficient to route any packets through")]
     InsufficientNetworkTopology(#[from] NymTopologyError),
 
     #[error("experienced a failure with our reply surb persistent storage: {source}")]
@@ -50,22 +58,13 @@ pub enum ClientCoreError {
         source: Box<dyn Error + Send + Sync>,
     },
 
-    #[error("experienced a failure with our gateway details storage: {source}")]
-    GatewayDetailsStoreError {
+    #[error("experienced a failure with our gateways details storage: {source}")]
+    GatewaysDetailsStoreError {
         source: Box<dyn Error + Send + Sync>,
     },
 
-    #[error("The gateway id is invalid - {0}")]
+    #[error("the gateway id is invalid - {0}")]
     UnableToCreatePublicKeyFromGatewayId(Ed25519RecoveryError),
-
-    #[error("The identity of the gateway is unknown - did you run init?")]
-    GatewayIdUnknown,
-
-    #[error("The owner of the gateway is unknown - did you run init?")]
-    GatewayOwnerUnknown,
-
-    #[error("The address of the gateway is unknown - did you run init?")]
-    GatewayAddressUnknown,
 
     #[error("The gateway is malformed: {source}")]
     MalformedGateway {
@@ -83,28 +82,36 @@ pub enum ClientCoreError {
     #[error("failed to establish gateway connection (wasm)")]
     GatewayJsConnectionFailure,
 
-    #[error("Gateway connection was abruptly closed")]
+    #[error("gateway connection was abruptly closed")]
     GatewayConnectionAbruptlyClosed,
 
-    #[error("Timed out while trying to establish gateway connection")]
+    #[error("timed out while trying to establish gateway connection")]
     GatewayConnectionTimeout,
 
-    #[error("No ping measurements for the gateway ({identity}) performed")]
+    #[error("no ping measurements for the gateway ({identity}) performed")]
     NoGatewayMeasurements { identity: String },
 
     #[error("failed to register receiver for reconstructed mixnet messages")]
     FailedToRegisterReceiver,
 
-    #[error("Unexpected exit")]
+    #[error("unexpected exit")]
     UnexpectedExit,
 
+    #[error("this operation would have resulted in the gateway {gateway_id:?} key being overwritten without permission")]
+    ForbiddenGatewayKeyOverwrite { gateway_id: String },
+
     #[error(
-        "This operation would have resulted in clients keys being overwritten without permission"
+        "this operation would have resulted in clients keys being overwritten without permission"
     )]
     ForbiddenKeyOverwrite,
 
-    #[error("gateway details are unavailable")]
+    #[error("the client doesn't have any gateway set as active")]
+    NoActiveGatewaySet,
+
+    #[error("gateway details for gateway {gateway_id:?} are unavailable")]
     UnavailableGatewayDetails {
+        gateway_id: String,
+        #[source]
         source: Box<dyn Error + Send + Sync>,
     },
 
@@ -116,6 +123,89 @@ pub enum ClientCoreError {
 
     #[error("the provided gateway details (for gateway {gateway_id}) do not correspond to the shared keys")]
     MismatchedGatewayDetails { gateway_id: String },
+
+    #[error("unable to upgrade config file from `{current_version}`")]
+    ConfigFileUpgradeFailure { current_version: String },
+
+    #[error("unable to upgrade config file to `{new_version}`")]
+    UnableToUpgradeConfigFile { new_version: String },
+
+    #[error("failed to upgrade config file: {message}")]
+    UpgradeFailure { message: String },
+
+    #[error("the provided gateway details don't much the stored data")]
+    MismatchedStoredGatewayDetails,
+
+    #[error("custom selection of gateway was expected")]
+    CustomGatewaySelectionExpected,
+
+    #[error("the persisted gateway details were set for a custom setup")]
+    UnexpectedPersistedCustomGatewayDetails,
+
+    #[error("this client has performed gateway initialisation in another session")]
+    NoInitClientPresent,
+
+    #[error("there are no gateways supporting the wss protocol available")]
+    NoWssGateways,
+
+    #[error("the specified gateway '{gateway}' does not support the wss protocol")]
+    UnsupportedWssProtocol { gateway: String },
+
+    #[error(
+    "failed to load custom topology using path '{}'. detailed message: {source}", file_path.display()
+    )]
+    CustomTopologyLoadFailure {
+        file_path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error(
+    "failed to save config file for client-{typ} id {id} using path '{}'. detailed message: {source}", path.display()
+    )]
+    ConfigSaveFailure {
+        typ: String,
+        id: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("the provided gateway identity {gateway_id} is malformed: {source}")]
+    MalformedGatewayIdentity {
+        gateway_id: String,
+
+        #[source]
+        source: Ed25519RecoveryError,
+    },
+
+    #[error("the account owner of gateway {gateway_id} ({raw_owner}) is malformed: {err}")]
+    MalformedGatewayOwnerAccountAddress {
+        gateway_id: String,
+
+        raw_owner: String,
+
+        // just use the string formatting as opposed to underlying type to avoid having to import cosmrs
+        err: String,
+    },
+
+    #[error(
+        "the listening address of gateway {gateway_id} ({raw_listener}) is malformed: {source}"
+    )]
+    MalformedListener {
+        gateway_id: String,
+
+        raw_listener: String,
+
+        #[source]
+        source: url::ParseError,
+    },
+
+    #[error("this client (id: '{client_id}') has already been initialised before. If you want to add additional gateway, use `add-gateway` command")]
+    AlreadyInitialised { client_id: String },
+
+    #[error("this client has already registered with gateway {gateway_id}")]
+    AlreadyRegistered { gateway_id: String },
 }
 
 /// Set of messages that the client can send to listeners via the task manager

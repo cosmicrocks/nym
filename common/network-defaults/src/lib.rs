@@ -2,45 +2,49 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::var_names::{DEPRECATED_API_VALIDATOR, DEPRECATED_NYMD_VALIDATOR, NYM_API, NYXD};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 use std::{
     env::{var, VarError},
     ffi::OsStr,
     ops::Not,
-    path::PathBuf,
 };
 use url::Url;
 
 pub mod mainnet;
 pub mod var_names;
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, JsonSchema)]
 pub struct ChainDetails {
     pub bech32_account_prefix: String,
     pub mix_denom: DenomDetailsOwned,
     pub stake_denom: DenomDetailsOwned,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, JsonSchema)]
 pub struct NymContracts {
     pub mixnet_contract_address: Option<String>,
     pub vesting_contract_address: Option<String>,
-    pub bandwidth_claim_contract_address: Option<String>,
     pub coconut_bandwidth_contract_address: Option<String>,
     pub group_contract_address: Option<String>,
     pub multisig_contract_address: Option<String>,
     pub coconut_dkg_contract_address: Option<String>,
+    pub ephemera_contract_address: Option<String>,
     pub service_provider_directory_contract_address: Option<String>,
     pub name_service_contract_address: Option<String>,
 }
 
 // I wanted to use the simpler `NetworkDetails` name, but there's a clash
 // with `NetworkDetails` defined in all.rs...
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, JsonSchema)]
 pub struct NymNetworkDetails {
+    pub network_name: String,
     pub chain_details: ChainDetails,
     pub endpoints: Vec<ValidatorDetails>,
     pub contracts: NymContracts,
+    pub explorer_api: Option<String>,
 }
 
 // by default we assume the same defaults as mainnet, i.e. same prefixes and denoms
@@ -53,6 +57,7 @@ impl Default for NymNetworkDetails {
 impl NymNetworkDetails {
     pub fn new_empty() -> Self {
         NymNetworkDetails {
+            network_name: Default::default(),
             chain_details: ChainDetails {
                 bech32_account_prefix: Default::default(),
                 mix_denom: DenomDetailsOwned {
@@ -68,19 +73,27 @@ impl NymNetworkDetails {
             },
             endpoints: Default::default(),
             contracts: Default::default(),
+            explorer_api: Default::default(),
         }
     }
 
     pub fn new_from_env() -> Self {
         fn get_optional_env<K: AsRef<OsStr>>(env: K) -> Option<String> {
             match var(env) {
-                Ok(var) => Some(var),
+                Ok(var) => {
+                    if var.is_empty() {
+                        None
+                    } else {
+                        Some(var)
+                    }
+                }
                 Err(VarError::NotPresent) => None,
                 err => panic!("Unable to set: {:?}", err),
             }
         }
 
         NymNetworkDetails::new_empty()
+            .with_network_name(var(var_names::NETWORK_NAME).expect("network name not set"))
             .with_bech32_account_prefix(
                 var(var_names::BECH32_PREFIX).expect("bech32 prefix not set"),
             )
@@ -102,37 +115,25 @@ impl NymNetworkDetails {
                     .parse()
                     .expect("denomination exponent is not u32"),
             })
-            .with_validator_endpoint(ValidatorDetails::new(
+            .with_additional_validator_endpoint(ValidatorDetails::new(
                 var(var_names::NYXD).expect("nyxd validator not set"),
                 Some(var(var_names::NYM_API).expect("nym api not set")),
+                get_optional_env(var_names::NYXD_WEBSOCKET),
             ))
-            .with_mixnet_contract(Some(
-                var(var_names::MIXNET_CONTRACT_ADDRESS).expect("mixnet contract not set"),
+            .with_mixnet_contract(get_optional_env(var_names::MIXNET_CONTRACT_ADDRESS))
+            .with_vesting_contract(get_optional_env(var_names::VESTING_CONTRACT_ADDRESS))
+            .with_coconut_bandwidth_contract(get_optional_env(
+                var_names::COCONUT_BANDWIDTH_CONTRACT_ADDRESS,
             ))
-            .with_vesting_contract(Some(
-                var(var_names::VESTING_CONTRACT_ADDRESS).expect("vesting contract not set"),
-            ))
-            .with_bandwidth_claim_contract(Some(
-                var(var_names::BANDWIDTH_CLAIM_CONTRACT_ADDRESS)
-                    .expect("bandwidth claim contract not set"),
-            ))
-            .with_coconut_bandwidth_contract(Some(
-                var(var_names::COCONUT_BANDWIDTH_CONTRACT_ADDRESS)
-                    .expect("coconut bandwidth contract not set"),
-            ))
-            .with_group_contract(Some(
-                var(var_names::GROUP_CONTRACT_ADDRESS).expect("group contract not set"),
-            ))
-            .with_multisig_contract(Some(
-                var(var_names::MULTISIG_CONTRACT_ADDRESS).expect("multisig contract not set"),
-            ))
-            .with_coconut_dkg_contract(Some(
-                var(var_names::COCONUT_DKG_CONTRACT_ADDRESS).expect("coconut dkg contract not set"),
-            ))
+            .with_group_contract(get_optional_env(var_names::GROUP_CONTRACT_ADDRESS))
+            .with_multisig_contract(get_optional_env(var_names::MULTISIG_CONTRACT_ADDRESS))
+            .with_coconut_dkg_contract(get_optional_env(var_names::COCONUT_DKG_CONTRACT_ADDRESS))
+            .with_ephemera_contract(get_optional_env(var_names::EPHEMERA_CONTRACT_ADDRESS))
             .with_service_provider_directory_contract(get_optional_env(
                 var_names::SERVICE_PROVIDER_DIRECTORY_CONTRACT_ADDRESS,
             ))
             .with_name_service_contract(get_optional_env(var_names::NAME_SERVICE_CONTRACT_ADDRESS))
+            .with_explorer_api(get_optional_env(var_names::EXPLORER_API))
     }
 
     pub fn new_mainnet() -> Self {
@@ -142,6 +143,7 @@ impl NymNetworkDetails {
 
         // Consider caching this process (lazy static)
         NymNetworkDetails {
+            network_name: mainnet::NETWORK_NAME.into(),
             chain_details: ChainDetails {
                 bech32_account_prefix: mainnet::BECH32_PREFIX.into(),
                 mix_denom: mainnet::MIX_DENOM.into(),
@@ -151,9 +153,6 @@ impl NymNetworkDetails {
             contracts: NymContracts {
                 mixnet_contract_address: parse_optional_str(mainnet::MIXNET_CONTRACT_ADDRESS),
                 vesting_contract_address: parse_optional_str(mainnet::VESTING_CONTRACT_ADDRESS),
-                bandwidth_claim_contract_address: parse_optional_str(
-                    mainnet::BANDWIDTH_CLAIM_CONTRACT_ADDRESS,
-                ),
                 coconut_bandwidth_contract_address: parse_optional_str(
                     mainnet::COCONUT_BANDWIDTH_CONTRACT_ADDRESS,
                 ),
@@ -162,10 +161,28 @@ impl NymNetworkDetails {
                 coconut_dkg_contract_address: parse_optional_str(
                     mainnet::COCONUT_DKG_CONTRACT_ADDRESS,
                 ),
+                ephemera_contract_address: parse_optional_str(mainnet::EPHEMERA_CONTRACT_ADDRESS),
                 service_provider_directory_contract_address: None,
                 name_service_contract_address: None,
             },
+            explorer_api: parse_optional_str(mainnet::EXPLORER_API),
         }
+    }
+
+    pub fn default_gas_price_amount(&self) -> f64 {
+        GAS_PRICE_AMOUNT
+    }
+
+    #[must_use]
+    pub fn with_network_name(mut self, network_name: String) -> Self {
+        self.network_name = network_name;
+        self
+    }
+
+    #[must_use]
+    pub fn with_chain_details(mut self, chain_details: ChainDetails) -> Self {
+        self.chain_details = chain_details;
+        self
     }
 
     #[must_use]
@@ -199,8 +216,20 @@ impl NymNetworkDetails {
     }
 
     #[must_use]
-    pub fn with_validator_endpoint(mut self, endpoint: ValidatorDetails) -> Self {
+    pub fn with_additional_validator_endpoint(mut self, endpoint: ValidatorDetails) -> Self {
         self.endpoints.push(endpoint);
+        self
+    }
+
+    #[must_use]
+    pub fn with_validator_endpoint(mut self, endpoint: ValidatorDetails) -> Self {
+        self.endpoints = vec![endpoint];
+        self
+    }
+
+    #[must_use]
+    pub fn with_contracts(mut self, contracts: NymContracts) -> Self {
+        self.contracts = contracts;
         self
     }
 
@@ -213,12 +242,6 @@ impl NymNetworkDetails {
     #[must_use]
     pub fn with_vesting_contract<S: Into<String>>(mut self, contract: Option<S>) -> Self {
         self.contracts.vesting_contract_address = contract.map(Into::into);
-        self
-    }
-
-    #[must_use]
-    pub fn with_bandwidth_claim_contract<S: Into<String>>(mut self, contract: Option<S>) -> Self {
-        self.contracts.bandwidth_claim_contract_address = contract.map(Into::into);
         self
     }
 
@@ -247,6 +270,12 @@ impl NymNetworkDetails {
     }
 
     #[must_use]
+    pub fn with_ephemera_contract<S: Into<String>>(mut self, contract: Option<S>) -> Self {
+        self.contracts.ephemera_contract_address = contract.map(Into::into);
+        self
+    }
+
+    #[must_use]
     pub fn with_service_provider_directory_contract<S: Into<String>>(
         mut self,
         contract: Option<S>,
@@ -258,6 +287,12 @@ impl NymNetworkDetails {
     #[must_use]
     pub fn with_name_service_contract<S: Into<String>>(mut self, contract: Option<S>) -> Self {
         self.contracts.name_service_contract_address = contract.map(Into::into);
+        self
+    }
+
+    #[must_use]
+    pub fn with_explorer_api<S: Into<String>>(mut self, endpoint: Option<S>) -> Self {
+        self.explorer_api = endpoint.map(Into::into);
         self
     }
 }
@@ -280,7 +315,7 @@ impl DenomDetails {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Hash, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Hash, Clone, PartialEq, Eq, JsonSchema)]
 pub struct DenomDetailsOwned {
     pub base: String,
     pub display: String,
@@ -308,10 +343,13 @@ impl DenomDetailsOwned {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, JsonSchema)]
 pub struct ValidatorDetails {
     // it is assumed those values are always valid since they're being provided in our defaults file
     pub nyxd_url: String,
+    //
+    pub websocket_url: Option<String>,
+
     // Right now api_url is optional as we are not running the api reliably on all validators
     // however, later on it should be a mandatory field
     pub api_url: Option<String>,
@@ -319,9 +357,10 @@ pub struct ValidatorDetails {
 }
 
 impl ValidatorDetails {
-    pub fn new<S: Into<String>>(nyxd_url: S, api_url: Option<S>) -> Self {
+    pub fn new<S: Into<String>>(nyxd_url: S, api_url: Option<S>, websocket_url: Option<S>) -> Self {
         ValidatorDetails {
             nyxd_url: nyxd_url.into(),
+            websocket_url: websocket_url.map(Into::into),
             api_url: api_url.map(Into::into),
         }
     }
@@ -329,6 +368,7 @@ impl ValidatorDetails {
     pub fn new_nyxd_only<S: Into<String>>(nyxd_url: S) -> Self {
         ValidatorDetails {
             nyxd_url: nyxd_url.into(),
+            websocket_url: None,
             api_url: None,
         }
     }
@@ -343,6 +383,12 @@ impl ValidatorDetails {
         self.api_url
             .as_ref()
             .map(|url| url.parse().expect("the provided api url is invalid!"))
+    }
+
+    pub fn websocket_url(&self) -> Option<Url> {
+        self.websocket_url
+            .as_ref()
+            .map(|url| url.parse().expect("the provided websocket url is invalid!"))
     }
 }
 
@@ -360,11 +406,25 @@ fn fix_deprecated_environmental_variables() {
     }
 }
 
-pub fn setup_env(config_env_file: Option<&PathBuf>) {
+// Read the variables from the file and log what the corresponding values in the environment are.
+fn print_env_vars_with_keys_in_file<P: AsRef<Path> + Copy>(config_env_file: P) {
+    let items = dotenvy::from_path_iter(config_env_file)
+        .expect("Invalid path to environment configuration file");
+    for item in items {
+        let (key, val) = item.expect("Invalid item in environment configuration file");
+        log::debug!("{}: {}", key, val);
+    }
+}
+
+pub fn setup_env<P: AsRef<Path>>(config_env_file: Option<P>) {
     match std::env::var(var_names::CONFIGURED) {
         // if the configuration is not already set in the env vars
         Err(std::env::VarError::NotPresent) => {
-            if let Some(config_env_file) = config_env_file {
+            if let Some(config_env_file) = &config_env_file {
+                log::debug!(
+                    "Loading environment variables from {:?}",
+                    config_env_file.as_ref()
+                );
                 dotenvy::from_path(config_env_file)
                     .expect("Invalid path to environment configuration file");
                 fix_deprecated_environmental_variables();
@@ -372,17 +432,25 @@ pub fn setup_env(config_env_file: Option<&PathBuf>) {
                 // if nothing is set, the use mainnet defaults
                 // if the user has not set `CONFIGURED`, then even if they set any of the env variables,
                 // overwrite them
+                log::debug!("Loading mainnet defaults");
                 crate::mainnet::export_to_env();
             }
         }
-        Err(_) => crate::mainnet::export_to_env(),
+        Err(_) => {
+            log::debug!("Environment variables already set. Using them");
+            crate::mainnet::export_to_env()
+        }
         _ => {
             fix_deprecated_environmental_variables();
         }
     }
 
     // if we haven't explicitly defined any of the constants, fallback to defaults
-    crate::mainnet::export_to_env_if_not_set()
+    crate::mainnet::export_to_env_if_not_set();
+
+    if let Some(config_env_file) = &config_env_file {
+        print_env_vars_with_keys_in_file(config_env_file);
+    }
 }
 
 // Name of the event triggered by the eth contract. If the event name is changed,
@@ -395,6 +463,9 @@ pub const ETH_ERC20_APPROVE_FUNCTION_NAME: &str = "approve";
 /// How much bandwidth (in bytes) one token can buy
 pub const BYTES_PER_UTOKEN: u64 = 1024;
 
+/// How much bandwidth (in bytes) one freepass provides
+pub const BYTES_PER_FREEPASS: u64 = 1024 * 1024 * 1024; // 1GB
+
 /// Threshold for claiming more bandwidth: 1 MB
 pub const REMAINING_BANDWIDTH_THRESHOLD: i64 = 1024 * 1024;
 /// How many ERC20 tokens should be burned to buy bandwidth
@@ -403,10 +474,6 @@ pub const TOKENS_TO_BURN: u64 = 1;
 pub const UTOKENS_TO_BURN: u64 = TOKENS_TO_BURN * 1000000;
 /// Default bandwidth (in bytes) that we try to buy
 pub const BANDWIDTH_VALUE: u64 = UTOKENS_TO_BURN * BYTES_PER_UTOKEN;
-
-pub const VOUCHER_INFO: &str = "BandwidthVoucher";
-
-pub const ETH_MIN_BLOCK_DEPTH: usize = 7;
 
 /// Defaults Cosmos Hub/ATOM path
 pub const COSMOS_DERIVATION_PATH: &str = "m/44'/118'/0'/0/0";
@@ -434,6 +501,9 @@ pub const DEFAULT_NYM_API_PORT: u16 = 8080;
 
 pub const NYM_API_VERSION: &str = "v1";
 
+// NYM-NODE
+pub const DEFAULT_NYM_NODE_HTTP_PORT: u16 = 8080;
+
 // REWARDING
 
 /// We'll be assuming a few more things, profit margin and cost function. Since we don't have reliable package measurement, we'll be using uptime. We'll also set the value of 1 Nym to 1 $, to be able to translate interval costs to Nyms. We'll also assume a cost of 40$ per interval(month), converting that to Nym at our 1$ rate translates to 40_000_000 uNyms
@@ -445,3 +515,12 @@ pub const NYM_API_VERSION: &str = "v1";
 pub const TOTAL_SUPPLY: u128 = 1_000_000_000_000_000;
 
 pub const DEFAULT_PROFIT_MARGIN: u8 = 10;
+
+// WIREGUARD
+pub const WG_PORT: u16 = 51822;
+
+// The interface used to route traffic
+pub const WG_TUN_BASE_NAME: &str = "nymwg";
+pub const WG_TUN_DEVICE_ADDRESS: &str = "10.1.0.1";
+pub const WG_TUN_DEVICE_IP_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1));
+pub const WG_TUN_DEVICE_NETMASK: &str = "255.255.255.0";

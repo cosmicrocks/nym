@@ -2,6 +2,7 @@
 name = "nym-socks5-listener"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -12,13 +13,9 @@ required-features = ["headers"]
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
-[profile.release]
-strip = true
-codegen-units = 1
-
 [dependencies]
 anyhow = { workspace = true }
-futures = "0.3"
+futures = { workspace = true }
 lazy_static = "1.4.0"
 nym-bin-common = { path = "../../../common/bin-common"}
 nym-client-core = { path = "../../../common/client-core", default-features = false }
@@ -26,13 +23,12 @@ nym-config-common = { path = "../../../common/config", package = "nym-config" }
 nym-credential-storage = { path = "../../../common/credential-storage" }
 nym-crypto = { path = "../../../common/crypto" }
 nym-socks5-client-core = { path = "../../../common/socks5-client-core", default-features = false }
-openssl = { version = "0.10", features = ["vendored"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 log = "0.4.17"
 rand = "0.7.3"
 
-safer-ffi = { version = "0.1.0-rc1" }
+safer-ffi = { version = "0.1.4" }
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.21", default-features = false }

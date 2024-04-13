@@ -17,7 +17,7 @@ use nym_sphinx_params::{PacketType, ReplySurbKeyDigestAlgorithm, DEFAULT_NUM_MIX
 use nym_sphinx_types::{Delay, NymPacket};
 use nym_topology::{NymTopology, NymTopologyError};
 use rand::{CryptoRng, Rng};
-use std::convert::TryFrom;
+
 use std::time::Duration;
 
 pub(crate) mod payload;
@@ -181,6 +181,7 @@ pub trait FragmentPreparer {
     /// - compute vk_b = g^x || v_b
     /// - compute sphinx_plaintext = SURB_ACK || g^x || v_b
     /// - compute sphinx_packet = Sphinx(recipient, sphinx_plaintext)
+    #[allow(clippy::too_many_arguments)]
     fn prepare_chunk_for_sending(
         &mut self,
         fragment: Fragment,
@@ -189,6 +190,7 @@ pub trait FragmentPreparer {
         packet_sender: &Recipient,
         packet_recipient: &Recipient,
         packet_type: PacketType,
+        mix_hops: Option<u8>,
     ) -> Result<PreparedFragment, NymTopologyError> {
         // each plain or repliable packet (i.e. not a reply) attaches an ephemeral public key so that the recipient
         // could perform diffie-hellman with its own keys followed by a kdf to re-derive
@@ -226,7 +228,8 @@ pub trait FragmentPreparer {
         };
 
         // generate pseudorandom route for the packet
-        let hops = self.num_mix_hops();
+        let hops = mix_hops.unwrap_or(self.num_mix_hops());
+        log::trace!("Preparing chunk for sending with {} mix hops", hops);
         let route =
             topology.random_route_to_gateway(self.rng(), hops, packet_recipient.gateway())?;
         let destination = packet_recipient.as_sphinx_destination();
@@ -389,6 +392,7 @@ where
         ack_key: &AckKey,
         packet_recipient: &Recipient,
         packet_type: PacketType,
+        mix_hops: Option<u8>,
     ) -> Result<PreparedFragment, NymTopologyError> {
         let sender = self.sender_address;
 
@@ -400,6 +404,7 @@ where
             &sender,
             packet_recipient,
             packet_type,
+            mix_hops,
         )
     }
 

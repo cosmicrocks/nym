@@ -1,80 +1,136 @@
-// Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// Copyright 2021-2023 - Nym Technologies SA <contact@nymtech.net>
+// SPDX-License-Identifier: GPL-3.0-only
 
-use crate::node::client_handling::active_clients::ActiveClientsStore;
-use crate::node::client_handling::websocket::connection_handler::coconut::CoconutVerifier;
-use crate::node::client_handling::websocket::connection_handler::{
-    AuthenticatedHandler, ClientDetails, InitialAuthResult, SocketStream,
+use crate::error::RequestHandlingError;
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
 };
-use crate::node::storage::error::StorageError;
-use crate::node::storage::Storage;
-use futures::{channel::mpsc, SinkExt, StreamExt};
 use log::*;
 use nym_crypto::asymmetric::identity;
 use nym_gateway_requests::authentication::encrypted_address::{
     EncryptedAddressBytes, EncryptedAddressConversionError,
 };
-use nym_gateway_requests::iv::{IVConversionError, IV};
-use nym_gateway_requests::registration::handshake::error::HandshakeError;
-use nym_gateway_requests::registration::handshake::{gateway_handshake, SharedKeys};
-use nym_gateway_requests::types::{ClientControlRequest, ServerResponse};
-use nym_gateway_requests::{BinaryResponse, PROTOCOL_VERSION};
+use nym_gateway_requests::registration::handshake::shared_key::SharedKeyConversionError;
+use nym_gateway_requests::{
+    iv::{IVConversionError, IV},
+    registration::handshake::{error::HandshakeError, gateway_handshake, SharedKeys},
+    types::{ClientControlRequest, ServerResponse},
+    BinaryResponse, CURRENT_PROTOCOL_VERSION, INITIAL_PROTOCOL_VERSION,
+};
 use nym_mixnet_client::forwarder::MixForwardingSender;
 use nym_sphinx::DestinationAddressBytes;
 use rand::{CryptoRng, Rng};
-use std::convert::TryFrom;
-use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::{protocol::Message, Error as WsError};
+
+use crate::node::client_handling::websocket::common_state::CommonHandlerState;
+use crate::node::client_handling::websocket::connection_handler::AvailableBandwidth;
+use crate::node::{
+    client_handling::{
+        active_clients::ActiveClientsStore,
+        websocket::{
+            connection_handler::{
+                AuthenticatedHandler, ClientDetails, InitialAuthResult, SocketStream,
+            },
+            message_receiver::{IsActive, IsActiveRequestSender},
+        },
+    },
+    storage::{error::StorageError, Storage},
+};
 
 #[derive(Debug, Error)]
 pub(crate) enum InitialAuthenticationError {
     #[error("Internal gateway storage error")]
     StorageError(#[from] StorageError),
 
-    #[error("Failed to perform registration handshake - {0}")]
+    #[error(
+        "our datastore is corrupted. the stored key for client {client_id} is malformed: {source}"
+    )]
+    MalformedStoredSharedKey {
+        client_id: String,
+        #[source]
+        source: SharedKeyConversionError,
+    },
+
+    #[error("Failed to perform registration handshake: {0}")]
     HandshakeError(#[from] HandshakeError),
 
-    #[error("Provided client address is malformed - {0}")]
-    // sphinx error is not used here directly as it's messaging might be confusing to people
+    #[error("Provided client address is malformed: {0}")]
+    // sphinx error is not used here directly as its messaging might be confusing to people
     MalformedClientAddress(String),
 
-    #[error("Provided encrypted client address is malformed - {0}")]
+    #[error("Provided encrypted client address is malformed: {0}")]
     MalformedEncryptedAddress(#[from] EncryptedAddressConversionError),
 
     #[error("There is already an open connection to this client")]
     DuplicateConnection,
 
-    #[error("Provided authentication IV is malformed - {0}")]
+    #[error("Provided authentication IV is malformed: {0}")]
     MalformedIV(#[from] IVConversionError),
 
     #[error("Only 'Register' or 'Authenticate' requests are allowed")]
     InvalidRequest,
 
-    #[error("Experienced connection error - {0}")]
+    #[error("Experienced connection error: {0}")]
     ConnectionError(#[from] WsError),
 
     #[error("Attempted to negotiate connection with client using incompatible protocol version. Ours is {current} and the client reports {client:?}")]
     IncompatibleProtocol { client: Option<u8>, current: u8 },
+
+    #[error("failed to send authentication error response: {source}")]
+    ErrorResponseSendFailure {
+        #[source]
+        source: WsError,
+    },
+
+    #[error("failed to send authentication response: {source}")]
+    ResponseSendFailure {
+        #[source]
+        source: WsError,
+    },
+
+    #[error("possibly received a sphinx packet without prior authentication. Request is going to be ignored")]
+    BinaryRequestWithoutAuthentication,
+
+    #[error("received a connection close message")]
+    CloseMessage,
+
+    #[error("the connection has unexpectedly closed")]
+    ClosedConnection,
+
+    #[error("failed to obtain message from websocket stream: {source}")]
+    FailedToReadMessage {
+        #[source]
+        source: WsError,
+    },
+
+    #[error("could not establish client details")]
+    EmptyClientDetails,
+
+    #[error("failed to upgrade the client handler: {source}")]
+    HandlerUpgradeFailure { source: RequestHandlingError },
 }
 
 impl InitialAuthenticationError {
     /// Converts this Error into an appropriate websocket Message.
-    fn into_error_message(self) -> Message {
+    fn to_error_message(&self) -> Message {
         ServerResponse::new_error(self.to_string()).into()
     }
 }
 
 pub(crate) struct FreshHandler<R, S, St> {
     rng: R,
-    local_identity: Arc<identity::KeyPair>,
-    pub(crate) only_coconut_credentials: bool,
+    pub(crate) shared_state: CommonHandlerState,
     pub(crate) active_clients_store: ActiveClientsStore,
     pub(crate) outbound_mix_sender: MixForwardingSender,
     pub(crate) socket_connection: SocketStream<S>,
     pub(crate) storage: St,
-    pub(crate) coconut_verifier: Arc<CoconutVerifier>,
+
+    // currently unused (but populated)
+    pub(crate) negotiated_protocol: Option<u8>,
 }
 
 impl<R, S, St> FreshHandler<R, S, St>
@@ -90,22 +146,19 @@ where
     pub(crate) fn new(
         rng: R,
         conn: S,
-        only_coconut_credentials: bool,
         outbound_mix_sender: MixForwardingSender,
-        local_identity: Arc<identity::KeyPair>,
         storage: St,
         active_clients_store: ActiveClientsStore,
-        coconut_verifier: Arc<CoconutVerifier>,
+        shared_state: CommonHandlerState,
     ) -> Self {
         FreshHandler {
             rng,
             active_clients_store,
-            only_coconut_credentials,
             outbound_mix_sender,
             socket_connection: SocketStream::RawTcp(conn),
-            local_identity,
             storage,
-            coconut_verifier,
+            negotiated_protocol: None,
+            shared_state,
         }
     }
 
@@ -147,7 +200,7 @@ where
                 gateway_handshake(
                     &mut self.rng,
                     ws_stream,
-                    self.local_identity.as_ref(),
+                    self.shared_state.local_identity.as_ref(),
                     init_msg,
                 )
                 .await
@@ -290,7 +343,7 @@ where
     /// Checks whether the stored shared keys match the received data, i.e. whether the upon decryption
     /// the provided encrypted address matches the expected unencrypted address.
     ///
-    /// Returns the the retrieved shared keys if the check was successful.
+    /// Returns the retrieved shared keys if the check was successful.
     ///
     /// # Arguments
     ///
@@ -306,13 +359,19 @@ where
         let shared_keys = self.storage.get_shared_keys(client_address).await?;
 
         if let Some(shared_keys) = shared_keys {
-            // the unwrap here is fine as we only ever construct persisted shared keys ourselves when inserting
+            // this should never fail as we only ever construct persisted shared keys ourselves when inserting
             // data to the storage. The only way it could fail is if we somehow changed implementation without
             // performing proper migration
             let keys = SharedKeys::try_from_base58_string(
                 shared_keys.derived_aes128_ctr_blake3_hmac_keys_bs58,
             )
-            .unwrap();
+            .map_err(|source| {
+                InitialAuthenticationError::MalformedStoredSharedKey {
+                    client_id: client_address.as_base58_string(),
+                    source,
+                }
+            })?;
+
             // TODO: SECURITY:
             // this is actually what we have been doing in the past, however,
             // after looking deeper into implementation it seems that only checks the encryption
@@ -329,30 +388,34 @@ where
         }
     }
 
-    fn check_client_protocol(
+    fn negotiate_client_protocol(
         &self,
         client_protocol: Option<u8>,
-    ) -> Result<(), InitialAuthenticationError> {
-        // right now there are no failure cases here, but this might change in the future
-        match client_protocol {
-            None => {
-                warn!("the client we're connected to has not specified its protocol version. It's probably running version < 1.1.X, but that's still fine for now. It will become a hard error in 1.2.0");
-                // note: in +1.2.0 we will have to return a hard error here
-                Ok(())
-            }
-            Some(v) if v != PROTOCOL_VERSION => {
-                let err = InitialAuthenticationError::IncompatibleProtocol {
-                    client: Some(v),
-                    current: PROTOCOL_VERSION,
-                };
-                error!("{err}");
-                Err(err)
-            }
+    ) -> Result<u8, InitialAuthenticationError> {
+        debug!("client protocol: {client_protocol:?}, ours: {CURRENT_PROTOCOL_VERSION}");
+        let Some(client_protocol_version) = client_protocol else {
+            warn!("the client we're connected to has not specified its protocol version. It's probably running version < 1.1.X, but that's still fine for now. It will become a hard error in 1.2.0");
+            // note: in +1.2.0 we will have to return a hard error here
+            return Ok(INITIAL_PROTOCOL_VERSION);
+        };
 
-            Some(_) => {
-                info!("the client is using exactly the same protocol version as we are. We're good to continue!");
-                Ok(())
-            }
+        // a v2 gateway will understand v1 requests, but v1 client will not understand v2 responses
+        if client_protocol_version == 1 {
+            return Ok(1);
+        }
+
+        // we can't handle clients with higher protocol than ours
+        // (perhaps we could try to negotiate downgrade on our end? sounds like a nice future improvement)
+        if client_protocol_version <= CURRENT_PROTOCOL_VERSION {
+            info!("the client is using exactly the same (or older) protocol version as we are. We're good to continue!");
+            Ok(CURRENT_PROTOCOL_VERSION)
+        } else {
+            let err = InitialAuthenticationError::IncompatibleProtocol {
+                client: client_protocol,
+                current: CURRENT_PROTOCOL_VERSION,
+            };
+            error!("{err}");
+            Err(err)
         }
     }
 
@@ -394,6 +457,59 @@ where
         }
     }
 
+    async fn handle_duplicate_client(
+        &mut self,
+        address: DestinationAddressBytes,
+        mut is_active_request_tx: IsActiveRequestSender,
+    ) -> Result<(), InitialAuthenticationError> {
+        // Ask the other connection to ping if they are still active.
+        // Use a oneshot channel to return the result to us
+        let (ping_result_sender, ping_result_receiver) = oneshot::channel();
+        debug!("Asking other connection handler to ping the connected client to see if it is still active");
+        if let Err(err) = is_active_request_tx.send(ping_result_sender).await {
+            warn!("Failed to send ping request to other handler: {err}");
+        }
+
+        // Wait for the reply
+        match tokio::time::timeout(Duration::from_millis(2000), ping_result_receiver).await {
+            Ok(Ok(res)) => {
+                match res {
+                    IsActive::NotActive => {
+                        // The other handler reported that the client is not active, so we can
+                        // disconnect the other client and continue with this connection.
+                        debug!("Other handler reports it is not active");
+                        self.active_clients_store.disconnect(address);
+                    }
+                    IsActive::Active => {
+                        // The other handled reported a positive reply, so we have to assume it's
+                        // still active and disconnect this connection.
+                        info!("Other handler reports it is active");
+                        return Err(InitialAuthenticationError::DuplicateConnection);
+                    }
+                    IsActive::BusyPinging => {
+                        // The other handler is already busy pinging the client, so we have to
+                        // assume it's still active and disconnect this connection.
+                        debug!("Other handler reports it is already busy pinging the client");
+                        return Err(InitialAuthenticationError::DuplicateConnection);
+                    }
+                }
+            }
+            Ok(Err(_)) => {
+                // Other channel failed to reply (the channel sender probably dropped)
+                info!("Other connection failed to reply, disconnecting it in favour of this new connection");
+                self.active_clients_store.disconnect(address);
+            }
+            Err(_) => {
+                // Timeout waiting for reply
+                warn!(
+                    "Other connection timed out, disconnecting it in favour of this new connection"
+                );
+                self.active_clients_store.disconnect(address);
+            }
+        }
+        Ok(())
+    }
+
     /// Tries to handle the received authentication request by checking correctness of the received data.
     ///
     /// # Arguments
@@ -411,37 +527,55 @@ where
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        self.check_client_protocol(client_protocol_version)?;
+        let negotiated_protocol = self.negotiate_client_protocol(client_protocol_version)?;
+        // populate the negotiated protocol for future uses
+        self.negotiated_protocol = Some(negotiated_protocol);
 
         let address = DestinationAddressBytes::try_from_base58_string(address)
             .map_err(|err| InitialAuthenticationError::MalformedClientAddress(err.to_string()))?;
         let encrypted_address = EncryptedAddressBytes::try_from_base58_string(enc_address)?;
         let iv = IV::try_from_base58_string(iv)?;
 
-        if self.active_clients_store.get(address).is_some() {
-            return Err(InitialAuthenticationError::DuplicateConnection);
+        // Check for duplicate clients
+        if let Some(client_tx) = self.active_clients_store.get_remote_client(address) {
+            warn!("Detected duplicate connection for client: {address}");
+            self.handle_duplicate_client(address, client_tx.is_active_request_sender)
+                .await?;
         }
 
         let shared_keys = self
             .authenticate_client(address, encrypted_address, iv)
             .await?;
         let status = shared_keys.is_some();
-        let bandwidth_remaining = self
-            .storage
-            .get_available_bandwidth(address)
-            .await?
-            .unwrap_or(0);
+
+        let available_bandwidth: AvailableBandwidth =
+            self.storage.get_available_bandwidth(address).await?.into();
+
+        let bandwidth_remaining = if available_bandwidth.freepass_expired() {
+            self.expire_freepass(address).await?;
+            0
+        } else {
+            available_bandwidth.bytes
+        };
+
         let client_details =
             shared_keys.map(|shared_keys| ClientDetails::new(address, shared_keys));
 
         Ok(InitialAuthResult::new(
             client_details,
             ServerResponse::Authenticate {
-                protocol_version: Some(PROTOCOL_VERSION),
+                protocol_version: Some(negotiated_protocol),
                 status,
                 bandwidth_remaining,
             },
         ))
+    }
+
+    pub(crate) async fn expire_freepass(
+        &self,
+        client: DestinationAddressBytes,
+    ) -> Result<(), StorageError> {
+        self.storage.reset_freepass_bandwidth(client).await
     }
 
     /// Attempts to finalize registration of the client by storing the derived shared keys in the
@@ -498,12 +632,14 @@ where
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        self.check_client_protocol(client_protocol_version)?;
+        let negotiated_protocol = self.negotiate_client_protocol(client_protocol_version)?;
+        // populate the negotiated protocol for future uses
+        self.negotiated_protocol = Some(negotiated_protocol);
 
         let remote_identity = Self::extract_remote_identity_from_register_init(&init_data)?;
         let remote_address = remote_identity.derive_destination_address();
 
-        if self.active_clients_store.get(remote_address).is_some() {
+        if self.active_clients_store.is_active(remote_address) {
             return Err(InitialAuthenticationError::DuplicateConnection);
         }
 
@@ -515,7 +651,7 @@ where
         Ok(InitialAuthResult::new(
             Some(client_details),
             ServerResponse::Register {
-                protocol_version: Some(PROTOCOL_VERSION),
+                protocol_version: Some(negotiated_protocol),
                 status,
             },
         ))
@@ -563,7 +699,7 @@ where
     // TODO: somehow cleanup this method
     pub(crate) async fn perform_initial_authentication(
         mut self,
-    ) -> Option<AuthenticatedHandler<R, S, St>>
+    ) -> Result<AuthenticatedHandler<R, S, St>, InitialAuthenticationError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
@@ -572,58 +708,82 @@ where
         while let Some(msg) = self.read_websocket_message().await {
             let msg = match msg {
                 Ok(msg) => msg,
-                Err(err) => {
-                    error!("failed to obtain message from websocket stream! stopping connection handler: {err}");
-                    break;
+                Err(source) => {
+                    debug!("failed to obtain message from websocket stream! stopping connection handler: {source}");
+                    return Err(InitialAuthenticationError::FailedToReadMessage { source });
                 }
             };
 
             if msg.is_close() {
-                break;
+                return Err(InitialAuthenticationError::CloseMessage);
             }
 
             // ONLY handle 'Authenticate' or 'Register' requests, ignore everything else
             match msg {
-                Message::Close(_) => break,
+                // we have explicitly checked for close message
+                Message::Close(_) => unreachable!(),
                 Message::Text(text_msg) => {
                     let (mix_sender, mix_receiver) = mpsc::unbounded();
-                    match self.handle_initial_authentication_request(text_msg).await {
+                    return match self.handle_initial_authentication_request(text_msg).await {
                         Err(err) => {
-                            if let Err(err) =
-                                self.send_websocket_message(err.into_error_message()).await
+                            debug!("authentication failure: {err}");
+
+                            // try to send error to the client
+                            if let Err(source) =
+                                self.send_websocket_message(err.to_error_message()).await
                             {
-                                debug!("Failed to send authentication error response - {err}");
-                                return None;
+                                debug!("Failed to send authentication error response: {source}");
+                                return Err(InitialAuthenticationError::ErrorResponseSendFailure {
+                                    source,
+                                });
                             }
+                            // return the underlying error
+                            Err(err)
                         }
                         Ok(auth_result) => {
-                            if let Err(err) = self
+                            // try to send auth response back to the client
+                            if let Err(source) = self
                                 .send_websocket_message(auth_result.server_response.into())
                                 .await
                             {
-                                debug!("Failed to send authentication response - {err}");
-                                return None;
+                                debug!("Failed to send authentication response: {source}");
+                                return Err(InitialAuthenticationError::ResponseSendFailure {
+                                    source,
+                                });
                             }
 
-                            return if let Some(client_details) = auth_result.client_details {
-                                self.active_clients_store
-                                    .insert(client_details.address, mix_sender);
-                                Some(AuthenticatedHandler::upgrade(
+                            if let Some(client_details) = auth_result.client_details {
+                                // Channel for handlers to ask other handlers if they are still active.
+                                let (is_active_request_sender, is_active_request_receiver) =
+                                    mpsc::unbounded();
+                                self.active_clients_store.insert_remote(
+                                    client_details.address,
+                                    mix_sender,
+                                    is_active_request_sender,
+                                );
+                                AuthenticatedHandler::upgrade(
                                     self,
                                     client_details,
                                     mix_receiver,
-                                ))
+                                    is_active_request_receiver,
+                                )
+                                .await
+                                .map_err(|source| {
+                                    InitialAuthenticationError::HandlerUpgradeFailure { source }
+                                })
                             } else {
-                                None
-                            };
+                                // honestly, it's been so long I don't remember under what conditions its possible (if at all)
+                                // to have empty client details
+                                Err(InitialAuthenticationError::EmptyClientDetails)
+                            }
                         }
-                    }
+                    };
                 }
                 Message::Binary(_) => {
                     // perhaps logging level should be reduced here, let's leave it for now and see what happens
                     // if client is working correctly, this should have never happened
-                    warn!("possibly received a sphinx packet without prior authentication. Request is going to be ignored");
-                    if let Err(err) = self
+                    debug!("possibly received a sphinx packet without prior authentication. Request is going to be ignored");
+                    if let Err(source) = self
                         .send_websocket_message(
                             ServerResponse::new_error(
                                 "binary request without prior authentication",
@@ -632,15 +792,18 @@ where
                         )
                         .await
                     {
-                        debug!("Failed to send error response during authentication: {err}",)
+                        return Err(InitialAuthenticationError::ErrorResponseSendFailure {
+                            source,
+                        });
                     }
-                    return None;
+                    return Err(InitialAuthenticationError::BinaryRequestWithoutAuthentication);
                 }
 
                 _ => continue,
             };
         }
-        None
+
+        Err(InitialAuthenticationError::ClosedConnection)
     }
 
     pub(crate) async fn start_handling(self, shutdown: nym_task::TaskClient)

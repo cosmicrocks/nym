@@ -1,5 +1,5 @@
 // Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
@@ -36,7 +36,7 @@ impl<'r> FromRequest<'r> for LocalRequest {
                 "Received a request from {:?} for a local-only route",
                 request.client_ip()
             );
-            Outcome::Failure((Status::Unauthorized, NonLocalRequestError))
+            Outcome::Error((Status::Unauthorized, NonLocalRequestError))
         }
     }
 }

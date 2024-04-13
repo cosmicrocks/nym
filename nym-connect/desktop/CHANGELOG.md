@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [v1.1.21-kitkat] (2023-09-12)
+
+- NC - Handle failure when config is too old ([#3847])
+
+[#3847]: https://github.com/nymtech/nym/issues/3847
+
+## [v1.1.20-twix] (2023-09-05)
+
+- nym-connect directory error handling ([#3830])
+- NC - it should not be possible to toggle speedy mode while the connection is active ([#3816])
+
+[#3830]: https://github.com/nymtech/nym/pull/3830
+[#3816]: https://github.com/nymtech/nym/issues/3816
+
+## [v1.1.19-snickers] (2023-08-29)
+
+- NymConnect sometimes fails to connect because the gateway it fetches from the validator-api to use is running an old version (of the gateway binary) ([#3788])
+
+[#3788]: https://github.com/nymtech/nym/issues/3788
+
+## [1.1.18] (2023-08-22)
+
+- refactor(nc-desktop): use userdata storage to save user gateway&sp ([#3723])
+
+[#3723]: https://github.com/nymtech/nym/pull/3723
+
+## [1.1.17] (2023-08-16)
+
+- Add a "Send us your feedback" section in NC (on the main screen)  to collect user feedback using Sentry ([#3619])
+- NC native android - deploy on FDroid ([#3483])
+
+[#3619]: https://github.com/nymtech/nym/issues/3619
+[#3483]: https://github.com/nymtech/nym/issues/3483
+
+## [v1.1.16] (2023-08-08)
+
+- Uncouple network-requester <-> gateway in nym-connect and harbourmaster ([#3472])
+
+[#3472]: https://github.com/nymtech/nym/issues/3472
+
 ## [v1.1.15] (2023-07-25)
 
 - NC Desktop - remove sentry DSN from code ([#3694])

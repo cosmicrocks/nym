@@ -7,18 +7,30 @@ plugins {
 
 android {
     namespace = "net.nymtech.nyms5"
-    compileSdk = 33
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "net.nymtech.nyms5"
         minSdk = 24
-        targetSdk = 33
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    bundle {
+        language {
+            enableSplit = true
+        }
+        density {
+            enableSplit = true
+        }
+        abi {
+            enableSplit = true
         }
     }
 
@@ -99,6 +111,12 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+sentry {
+    // TODO disable auto upload of mapping files for now to ease FDroid submission
+    //   (avoiding to have to provide a sentry auth token during compile time)
+    autoUploadProguardMapping.set(false)
 }
 
 dependencies {

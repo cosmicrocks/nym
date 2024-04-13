@@ -1,5 +1,5 @@
 // Copyright 2021-2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::network_monitor::monitor::sender::GatewayPackets;
 use crate::network_monitor::test_route::TestRoute;
@@ -16,7 +16,7 @@ use nym_sphinx::params::{PacketSize, PacketType};
 use nym_topology::{gateway, mix};
 use rand_07::{rngs::ThreadRng, seq::SliceRandom, thread_rng, Rng};
 use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
+
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,7 +146,7 @@ impl PacketPreparer {
         let initialisation_backoff = Duration::from_secs(30);
         loop {
             let gateways = self.validator_cache.gateways_all().await;
-            let mixnodes = self.validator_cache.mixnodes_basic().await;
+            let mixnodes = self.validator_cache.mixnodes_all_basic().await;
 
             if gateways.len() < minimum_full_routes {
                 self.topology_wait_backoff(initialisation_backoff).await;
@@ -179,8 +179,17 @@ impl PacketPreparer {
     async fn all_mixnodes_and_gateways(&self) -> (Vec<MixNodeBond>, Vec<GatewayBond>) {
         info!("Obtaining network topology...");
 
-        let mixnodes = self.validator_cache.mixnodes_basic().await;
+        let mixnodes = self.validator_cache.mixnodes_all_basic().await;
         let gateways = self.validator_cache.gateways_all().await;
+
+        (mixnodes, gateways)
+    }
+
+    async fn filtered_mixnodes_and_gateways(&self) -> (Vec<MixNodeBond>, Vec<GatewayBond>) {
+        info!("Obtaining network topology...");
+
+        let mixnodes = self.validator_cache.mixnodes_filtered_basic().await;
+        let gateways = self.validator_cache.gateways_filtered().await;
 
         (mixnodes, gateways)
     }
@@ -208,7 +217,7 @@ impl PacketPreparer {
         n: usize,
         blacklist: &mut HashSet<String>,
     ) -> Option<Vec<TestRoute>> {
-        let (mixnodes, gateways) = self.all_mixnodes_and_gateways().await;
+        let (mixnodes, gateways) = self.filtered_mixnodes_and_gateways().await;
         // separate mixes into layers for easier selection
         let mut layered_mixes = HashMap::new();
         for mix in mixnodes {

@@ -1,5 +1,5 @@
 // Copyright 2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::cli::{try_load_current_config, version_check};
 use crate::error::NetworkRequesterError;
@@ -13,14 +13,14 @@ use nym_types::helpers::ConsoleSigningOutput;
 #[derive(Args, Clone)]
 pub(crate) struct Sign {
     /// The id of the mixnode you want to sign with
-    #[clap(long)]
+    #[arg(long)]
     id: String,
 
     /// Signs a transaction-specific payload, that is going to be sent to the smart contract, with your identity key
-    #[clap(long)]
+    #[arg(long)]
     contract_msg: String,
 
-    #[clap(short, long, default_value_t = OutputFormat::default())]
+    #[arg(short, long, default_value_t = OutputFormat::default())]
     output: OutputFormat,
 }
 
@@ -55,7 +55,7 @@ fn print_signed_contract_msg(
 }
 
 pub(crate) async fn execute(args: &Sign) -> Result<(), NetworkRequesterError> {
-    let config = try_load_current_config(&args.id)?;
+    let config = try_load_current_config(&args.id).await?;
 
     if !version_check(&config) {
         log::error!("Failed the local version check");

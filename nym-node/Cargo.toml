@@ -1,0 +1,61 @@
+# Copyright 2023 - Nym Technologies SA <contact@nymtech.net>
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "nym-node"
+version = "0.1.0"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+edition.workspace = true
+license = "GPL-3.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+bip39 = { workspace = true, features = ["zeroize"] }
+bs58.workspace = true
+celes = "2.4.0" # country codes
+clap = { workspace = true, features = ["cargo", "env"] }
+humantime-serde = { workspace = true }
+ipnetwork = "0.16.0"
+rand = "0.7.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["macros", "sync"] }
+toml = "0.8.12"
+url = { workspace = true, features = ["serde"] }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
+
+# temporary bonding information v1 (to grab and parse nym-mixnode and nym-gateway package versions)
+semver = "1.0.22"
+
+# system info:
+cupid = "0.6.1"
+sysinfo = "0.30.7"
+
+nym-bin-common = { path = "../common/bin-common", features = ["basic_tracing", "output_format"] }
+nym-client-core-config-types = { path = "../common/client-core/config-types" }
+nym-config = { path = "../common/config" }
+nym-crypto = { path = "../common/crypto", features = ["asymmetric", "rand"] }
+nym-node-http-api = { path = "nym-node-http-api" }
+nym-pemstore = { path = "../common/pemstore" }
+nym-sphinx-acknowledgements = { path = "../common/nymsphinx/acknowledgements" }
+nym-sphinx-addressing = { path = "../common/nymsphinx/addressing" }
+nym-task = { path = "../common/task" }
+nym-types = { path = "../common/types" }
+nym-wireguard-types = { path = "../common/wireguard-types", default-features = false }
+
+# nodes:
+nym-mixnode = { path = "../mixnode" }
+nym-gateway = { path = "../gateway" }
+nym-network-requester = { path = "../service-providers/network-requester" }
+nym-ip-packet-router = { path = "../service-providers/ip-packet-router" }
+
+[build-dependencies]
+# temporary bonding information v1 (to grab and parse nym-mixnode and nym-gateway package versions)
+cargo_metadata = "0.18.1"

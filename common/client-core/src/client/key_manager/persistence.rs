@@ -1,17 +1,15 @@
 // Copyright 2023 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::client::key_manager::KeyManager;
+use crate::client::key_manager::ClientKeys;
 use async_trait::async_trait;
 use std::error::Error;
 use tokio::sync::Mutex;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::config::disk_persistence::keys_paths::ClientKeysPaths;
+use crate::config::disk_persistence::ClientKeysPaths;
 #[cfg(not(target_arch = "wasm32"))]
 use nym_crypto::asymmetric::{encryption, identity};
-#[cfg(not(target_arch = "wasm32"))]
-use nym_gateway_requests::registration::handshake::SharedKeys;
 #[cfg(not(target_arch = "wasm32"))]
 use nym_pemstore::traits::{PemStorableKey, PemStorableKeyPair};
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,9 +23,9 @@ use nym_sphinx::acknowledgements::AckKey;
 pub trait KeyStore {
     type StorageError: Error;
 
-    async fn load_keys(&self) -> Result<KeyManager, Self::StorageError>;
+    async fn load_keys(&self) -> Result<ClientKeys, Self::StorageError>;
 
-    async fn store_keys(&self, keys: &KeyManager) -> Result<(), Self::StorageError>;
+    async fn store_keys(&self, keys: &ClientKeys) -> Result<(), Self::StorageError>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -85,23 +83,15 @@ impl OnDiskKeys {
     }
 
     #[doc(hidden)]
-    pub fn ephemeral_load_gateway_keys(
-        &self,
-    ) -> Result<zeroize::Zeroizing<SharedKeys>, OnDiskKeysError> {
-        self.load_key(self.paths.gateway_shared_key(), "gateway shared keys")
-            .map(zeroize::Zeroizing::new)
-    }
-
-    #[doc(hidden)]
     pub fn load_encryption_keypair(&self) -> Result<encryption::KeyPair, OnDiskKeysError> {
         let encryption_paths = self.paths.encryption_key_pair_path();
-        self.load_keypair(encryption_paths, "encryption keys")
+        self.load_keypair(encryption_paths, "encryption")
     }
 
     #[doc(hidden)]
     pub fn load_identity_keypair(&self) -> Result<identity::KeyPair, OnDiskKeysError> {
         let identity_paths = self.paths.identity_key_pair_path();
-        self.load_keypair(identity_paths, "identity keys")
+        self.load_keypair(identity_paths, "identity")
     }
 
     fn load_key<T: PemStorableKey>(
@@ -156,23 +146,19 @@ impl OnDiskKeys {
         })
     }
 
-    fn load_keys(&self) -> Result<KeyManager, OnDiskKeysError> {
+    fn load_keys(&self) -> Result<ClientKeys, OnDiskKeysError> {
         let identity_keypair = self.load_identity_keypair()?;
         let encryption_keypair = self.load_encryption_keypair()?;
-
         let ack_key: AckKey = self.load_key(self.paths.ack_key(), "ack key")?;
-        let gateway_shared_key: SharedKeys =
-            self.load_key(self.paths.gateway_shared_key(), "gateway shared keys")?;
 
-        Ok(KeyManager::from_keys(
+        Ok(ClientKeys::from_keys(
             identity_keypair,
             encryption_keypair,
-            gateway_shared_key,
             ack_key,
         ))
     }
 
-    fn store_keys(&self, keys: &KeyManager) -> Result<(), OnDiskKeysError> {
+    fn store_keys(&self, keys: &ClientKeys) -> Result<(), OnDiskKeysError> {
         let identity_paths = self.paths.identity_key_pair_path();
         let encryption_paths = self.paths.encryption_key_pair_path();
 
@@ -188,11 +174,6 @@ impl OnDiskKeys {
         )?;
 
         self.store_key(keys.ack_key.as_ref(), self.paths.ack_key(), "ack key")?;
-        self.store_key(
-            keys.gateway_shared_key.as_ref(),
-            self.paths.gateway_shared_key(),
-            "gateway shared keys",
-        )?;
 
         Ok(())
     }
@@ -203,18 +184,18 @@ impl OnDiskKeys {
 impl KeyStore for OnDiskKeys {
     type StorageError = OnDiskKeysError;
 
-    async fn load_keys(&self) -> Result<KeyManager, Self::StorageError> {
+    async fn load_keys(&self) -> Result<ClientKeys, Self::StorageError> {
         self.load_keys()
     }
 
-    async fn store_keys(&self, keys: &KeyManager) -> Result<(), Self::StorageError> {
+    async fn store_keys(&self, keys: &ClientKeys) -> Result<(), Self::StorageError> {
         self.store_keys(keys)
     }
 }
 
 #[derive(Default)]
 pub struct InMemEphemeralKeys {
-    keys: Mutex<Option<KeyManager>>,
+    keys: Mutex<Option<ClientKeys>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -226,11 +207,11 @@ pub struct EphemeralKeysError;
 impl KeyStore for InMemEphemeralKeys {
     type StorageError = EphemeralKeysError;
 
-    async fn load_keys(&self) -> Result<KeyManager, Self::StorageError> {
+    async fn load_keys(&self) -> Result<ClientKeys, Self::StorageError> {
         self.keys.lock().await.clone().ok_or(EphemeralKeysError)
     }
 
-    async fn store_keys(&self, keys: &KeyManager) -> Result<(), Self::StorageError> {
+    async fn store_keys(&self, keys: &ClientKeys) -> Result<(), Self::StorageError> {
         *self.keys.lock().await = Some(keys.clone());
         Ok(())
     }

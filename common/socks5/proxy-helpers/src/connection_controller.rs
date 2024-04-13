@@ -132,7 +132,7 @@ impl Controller {
         } else {
             // check if there were any pending messages
             if let Some(pending) = self.pending_messages.remove(&conn_id) {
-                debug!("There were some pending messages for {}", conn_id);
+                debug!("There were some pending messages for {conn_id}");
                 for data in pending {
                     self.send_to_connection(data)
                 }
@@ -141,12 +141,9 @@ impl Controller {
     }
 
     fn remove_connection(&mut self, conn_id: ConnectionId) {
-        debug!("Removing {} from controller", conn_id);
+        debug!("Removing {conn_id} from controller");
         if self.active_connections.remove(&conn_id).is_none() {
-            error!(
-                "tried to remove non-existing connection with id: {:?}",
-                conn_id
-            )
+            error!("tried to remove non-existing connection with id: {conn_id}",)
         }
         self.recently_closed.insert(conn_id);
 
@@ -171,7 +168,7 @@ impl Controller {
 
             if let Some(payload) = active_connection.read_from_buf() {
                 if let Some(closed_at_index) = active_connection.closed_at_index {
-                    if payload.last_sequence > closed_at_index {
+                    if payload.last_sequence >= closed_at_index {
                         active_connection.is_closed = true;
                     }
                 }
@@ -196,10 +193,7 @@ impl Controller {
             }
         } else if !self.recently_closed.contains(&hdr.connection_id) {
             debug!("Received a 'Send' before 'Connect' - going to buffer the data");
-            let pending = self
-                .pending_messages
-                .entry(hdr.connection_id)
-                .or_insert_with(Vec::new);
+            let pending = self.pending_messages.entry(hdr.connection_id).or_default();
             pending.push(message);
         } else if !hdr.local_socket_closed {
             error!(

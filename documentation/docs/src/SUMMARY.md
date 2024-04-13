@@ -1,36 +1,53 @@
+#
 # Summary
 [Introduction](introduction.md)
 
 # Architecture
 - [Network Overview](architecture/network-overview.md)
 - [Mixnet Traffic Flow](architecture/traffic-flow.md)
-<!-- todo reintroduce this with themed images  -->
+<!-- TODO reintroduce this with themed images  -->
 <!-- - [Network Rewards](architecture/network-rewards.md) -->
 
 # Binaries
 - [Pre-built Binaries](binaries/pre-built-binaries.md)
+    - [Binary Initialisation and Configuration](binaries/init-and-config.md)
 - [Building from Source](binaries/building-nym.md)
-- [Binary Initialisation and Configuration](binaries/init-and-config.md)
 <!-- - [Version Compatibility Table](binaries/version-compatiblity.md) -->
 
 # Nodes
-- [Node Setup Guides](nodes/setup-guides.md)
-    - [Mix Node](nodes/mix-node-setup.md)
-    - [Gateway](nodes/gateway-setup.md)
-    - [Network Requester](nodes/network-requester-setup.md)
-    - [Validator](nodes/validator-setup.md)
-- [Troubleshooting](nodes/troubleshooting.md)
+- [Node Types (Previously Setup Guides)](nodes/overview.md)
+    - [Mix Node](nodes/mixnode.md)
+    - [Gateway](nodes/gateway.md)
+    - [Network Requester](nodes/network-requester.md)
+    - [Validator](nodes/validator.md)
 
 # Clients
 - [Clients Overview](clients/overview.md)
-    - [Websocket](clients/websocket-client.md)
-    - [Socks5](clients/socks5-client.md)
-    - [Webassembly](clients/webassembly-client.md)
+- [Websocket Client](clients/websocket-client.md)
+  - [Setup & Run](clients/websocket/setup.md)
+  - [Configuration](clients/websocket/config.md)
+  - [Using Your Client](clients/websocket/usage.md)
+  - [Examples](clients/websocket/examples.md)
+- [Socks5 Client](clients/socks5-client.md)
+- [Webassembly Client](clients/webassembly-client.md)
 - [Addressing System](clients/addressing-system.md)
 
 # SDK
 - [Typescript SDK](sdk/typescript.md)
-- [Rust SDK](sdk/rust.md)
+- [Rust SDK](sdk/rust/rust.md)
+  - [Message Types](sdk/rust/message-types.md)
+  - [Message Helpers](sdk/rust/message-helpers.md)
+  - [Troubleshooting](sdk/rust/troubleshooting.md)
+  - [Examples](sdk/rust/examples.md)
+    - [Simple Send](sdk/rust/examples/simple.md)
+    - [Create and Store Keys](sdk/rust/examples/keys.md)
+    - [Manual Storage](sdk/rust/examples/storage.md)
+    - [Anonymous Replies](sdk/rust/examples/surbs.md)
+    - [Use Custom Network Topology](sdk/rust/examples/custom-network.md)
+    - [Socks Proxy](sdk/rust/examples/socks.md)
+    - [Split Send and Receive](sdk/rust/examples/split-send.md)
+    - [Testnet Bandwidth Cred](sdk/rust/examples/credential.md)
+    - [Example Cargo file](sdk/rust/examples/cargo.md)
 
 # Wallet
 - [Desktop Wallet](wallet/desktop-wallet.md)
@@ -40,7 +57,7 @@
 - [Mixnet Explorer](explorers/mixnet-explorer.md)
 
 # Nyx Blockchain
-<!-- - [Interacting with Nyx Chain and Smart Contracts](nyx/interacting-with-chain.md) -->
+- [Interacting with Nyx Chain and Smart Contracts](nyx/interacting-with-chain.md)
 - [Smart Contracts](nyx/smart-contracts.md)
     - [Mixnet Contract](nyx/mixnet-contract.md)
     - [Vesting Contract](nyx/vesting-contract.md)

@@ -1,16 +1,19 @@
 // Copyright 2021-2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::support::config::persistence::{
-    CoconutSignerPaths, NetworkMonitorPaths, NodeStatusAPIPaths,
+    CoconutSignerPaths, NetworkMonitorPaths, NodeStatusAPIPaths, NymApiPaths,
 };
+use crate::support::config::r#override::OverrideConfig;
 use crate::support::config::template::CONFIG_TEMPLATE;
-use nym_config::defaults::mainnet;
+use anyhow::bail;
+use nym_config::defaults::mainnet::read_parsed_var_if_not_default;
+use nym_config::defaults::var_names::{CONFIGURED, NYXD};
+use nym_config::serde_helpers::de_maybe_stringified;
 use nym_config::{
     must_get_home, read_config_from_toml_file, save_formatted_config_to_file, NymConfigTemplate,
-    DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILENAME, DEFAULT_DATA_DIR, NYM_DIR,
+    DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILENAME, DEFAULT_DATA_DIR, DEFAULT_NYM_APIS_DIR, NYM_DIR,
 };
-use nym_validator_client::nyxd;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,16 +22,15 @@ use url::Url;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub(crate) mod helpers;
-pub(crate) mod old_config_v1_1_21;
+
+mod r#override;
 mod persistence;
 mod template;
-
-const DEFAULT_NYM_APIS_DIR: &str = "nym-api";
+mod upgrade_helpers;
 
 pub const DEFAULT_LOCAL_VALIDATOR: &str = "http://localhost:26657";
-pub const DEFAULT_NYM_API_PORT: u16 = 8080;
 
-pub const DEFAULT_DKG_CONTRACT_POLLING_RATE: Duration = Duration::from_secs(10);
+pub const DEFAULT_DKG_CONTRACT_POLLING_RATE: Duration = Duration::from_secs(30);
 
 const DEFAULT_GATEWAY_SENDING_RATE: usize = 200;
 const DEFAULT_MAX_CONCURRENT_GATEWAY_CLIENTS: usize = 50;
@@ -50,6 +52,10 @@ const DEFAULT_PER_NODE_TEST_PACKETS: usize = 3;
 const DEFAULT_TOPOLOGY_CACHE_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_NODE_STATUS_CACHE_INTERVAL: Duration = Duration::from_secs(120);
 const DEFAULT_CIRCULATING_SUPPLY_CACHE_INTERVAL: Duration = Duration::from_secs(3600);
+
+pub(crate) const DEFAULT_NODE_DESCRIBE_CACHE_INTERVAL: Duration = Duration::from_secs(4500);
+pub(crate) const DEFAULT_NODE_DESCRIBE_BATCH_SIZE: usize = 50;
+
 const DEFAULT_MONITOR_THRESHOLD: u8 = 60;
 const DEFAULT_MIN_MIXNODE_RELIABILITY: u8 = 50;
 const DEFAULT_MIN_GATEWAY_RELIABILITY: u8 = 20;
@@ -82,6 +88,10 @@ pub fn default_data_directory<P: AsRef<Path>>(id: P) -> PathBuf {
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Config {
+    // additional metadata holding on-disk location of this config file
+    #[serde(skip)]
+    pub(crate) save_path: Option<PathBuf>,
+
     pub base: Base,
 
     // TODO: perhaps introduce separate 'path finder' field for all the paths and directories like we have with other configs
@@ -99,31 +109,93 @@ pub struct Config {
 }
 
 impl NymConfigTemplate for Config {
-    fn template() -> &'static str {
+    fn template(&self) -> &'static str {
         CONFIG_TEMPLATE
     }
 }
 
 impl Config {
     pub fn new<S: AsRef<str>>(id: S) -> Self {
-        let base_data_dir = default_data_directory(id.as_ref());
         Config {
+            save_path: None,
             base: Base::new_default(id.as_ref()),
-            network_monitor: NetworkMonitor::new_default(&base_data_dir),
-            node_status_api: NodeStatusAPI::new_default(&base_data_dir),
+            network_monitor: NetworkMonitor::new_default(id.as_ref()),
+            node_status_api: NodeStatusAPI::new_default(id.as_ref()),
             topology_cacher: Default::default(),
             circulating_supply_cacher: Default::default(),
             rewarding: Default::default(),
-            coconut_signer: CoconutSigner::new_default(base_data_dir),
+            coconut_signer: CoconutSigner::new_default(id.as_ref()),
         }
     }
 
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let can_sign = self.base.mnemonic.is_some();
+
+        if !can_sign && self.rewarding.enabled {
+            bail!("can't enable rewarding without providing a mnemonic")
+        }
+
+        if !can_sign && self.coconut_signer.enabled {
+            bail!("can't enable coconut signer without providing a mnemonic")
+        }
+
+        Ok(())
+    }
+
+    pub fn override_with_args<O: Into<OverrideConfig>>(mut self, args: O) -> Self {
+        let args = args.into();
+
+        if let Some(enabled_monitor) = args.enable_monitor {
+            self.network_monitor.enabled = enabled_monitor;
+        }
+        if let Some(enable_rewarding) = args.enable_rewarding {
+            self.rewarding.enabled = enable_rewarding;
+        }
+        if let Some(nyxd_upstream) = args.nyxd_validator {
+            self.base.local_validator = nyxd_upstream;
+        }
+        if let Some(mnemonic) = args.mnemonic {
+            self.base.mnemonic = Some(mnemonic)
+        }
+        if let Some(enable_zk_nym) = args.enable_zk_nym {
+            self.coconut_signer.enabled = enable_zk_nym
+        }
+        if let Some(announce_address) = args.announce_address {
+            self.coconut_signer.announce_address = Some(announce_address)
+        }
+        if let Some(monitor_credentials_mode) = args.monitor_credentials_mode {
+            self.network_monitor.debug.disabled_credentials_mode = !monitor_credentials_mode
+        }
+
+        self
+    }
+
+    pub fn override_with_env(mut self) -> Self {
+        if std::env::var(CONFIGURED).is_ok() {
+            // currently the only value that can be overridden is 'nyxd'
+            if let Some(Ok(custom_nyxd)) = read_parsed_var_if_not_default(NYXD) {
+                self.base.local_validator = custom_nyxd
+            }
+        }
+        self
+    }
+
+    // simple wrapper that reads config file and assigns path location
+    fn read_from_path<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let path = path.as_ref();
+        let mut loaded: Config = read_config_from_toml_file(path)?;
+        loaded.save_path = Some(path.to_path_buf());
+        debug!("loaded config file from {}", path.display());
+        Ok(loaded)
+    }
+
+    #[allow(dead_code)]
     pub fn read_from_toml_file<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        read_config_from_toml_file(path)
+        Self::read_from_path(path)
     }
 
     pub fn read_from_default_path<P: AsRef<Path>>(id: P) -> io::Result<Self> {
-        Self::read_from_toml_file(default_config_filepath(id))
+        Self::read_from_path(default_config_filepath(id))
     }
 
     pub fn default_location(&self) -> PathBuf {
@@ -135,80 +207,21 @@ impl Config {
         save_formatted_config_to_file(self, config_save_location)
     }
 
-    pub fn with_network_monitor_enabled(mut self, enabled: bool) -> Self {
-        self.network_monitor.enabled = enabled;
-        self
-    }
-
-    pub fn with_disabled_credentials_mode(mut self, disabled_credentials_mode: bool) -> Self {
-        self.network_monitor.debug.disabled_credentials_mode = disabled_credentials_mode;
-        self
-    }
-
-    pub fn with_rewarding_enabled(mut self, enabled: bool) -> Self {
-        self.rewarding.enabled = enabled;
-        self
-    }
-
-    pub fn with_coconut_signer_enabled(mut self, enabled: bool) -> Self {
-        self.coconut_signer.enabled = enabled;
-        self
-    }
-
-    pub fn with_custom_nyxd_validator(mut self, validator: Url) -> Self {
-        self.base.local_validator = validator;
-        self
-    }
-
-    pub fn with_announce_address(mut self, announce_address: Url) -> Self {
-        self.coconut_signer.announce_address = announce_address;
-        self
-    }
-
-    pub fn with_custom_mixnet_contract(mut self, mixnet_contract: nyxd::AccountId) -> Self {
-        self.base.mixnet_contract_address = mixnet_contract;
-        self
-    }
-
-    pub fn with_custom_vesting_contract(mut self, vesting_contract: nyxd::AccountId) -> Self {
-        self.base.vesting_contract_address = vesting_contract;
-        self
-    }
-
-    pub fn with_mnemonic(mut self, mnemonic: bip39::Mnemonic) -> Self {
-        self.base.mnemonic = mnemonic;
-        self
-    }
-
-    pub fn with_minimum_interval_monitor_threshold(mut self, threshold: u8) -> Self {
-        self.rewarding.debug.minimum_interval_monitor_threshold = threshold;
-        self
-    }
-
-    pub fn with_min_mixnode_reliability(mut self, min_mixnode_reliability: u8) -> Self {
-        self.network_monitor.debug.min_mixnode_reliability = min_mixnode_reliability;
-        self
-    }
-
-    pub fn with_min_gateway_reliability(mut self, min_gateway_reliability: u8) -> Self {
-        self.network_monitor.debug.min_gateway_reliability = min_gateway_reliability;
-        self
+    pub fn try_save(&self) -> io::Result<()> {
+        if let Some(save_location) = &self.save_path {
+            save_formatted_config_to_file(self, save_location)
+        } else {
+            debug!("config file save location is unknown. falling back to the default");
+            self.save_to_default_location()
+        }
     }
 
     pub fn get_nyxd_url(&self) -> Url {
         self.base.local_validator.clone()
     }
 
-    pub fn get_mixnet_contract_address(&self) -> nyxd::AccountId {
-        self.base.mixnet_contract_address.clone()
-    }
-
-    pub fn get_vesting_contract_address(&self) -> nyxd::AccountId {
-        self.base.vesting_contract_address.clone()
-    }
-
-    pub fn get_mnemonic(&self) -> bip39::Mnemonic {
-        self.base.mnemonic.clone()
+    pub fn get_mnemonic(&self) -> Option<&bip39::Mnemonic> {
+        self.base.mnemonic.as_ref()
     }
 }
 
@@ -216,22 +229,19 @@ impl Config {
 #[derive(Debug, Deserialize, PartialEq, Eq, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct Base {
     /// ID specifies the human readable ID of this particular nym-api.
-    id: String,
+    pub id: String,
 
     #[zeroize(skip)]
-    local_validator: Url,
-
-    /// Address of the validator contract managing the network
-    #[zeroize(skip)]
-    mixnet_contract_address: nyxd::AccountId,
-
-    /// Address of the vesting contract holding locked tokens
-    #[zeroize(skip)]
-    vesting_contract_address: nyxd::AccountId,
+    pub local_validator: Url,
 
     /// Mnemonic used for rewarding and/or multisig operations
     // TODO: similarly to the note in gateway, this should get moved to a separate file
-    mnemonic: bip39::Mnemonic,
+    #[serde(deserialize_with = "de_maybe_stringified")]
+    mnemonic: Option<bip39::Mnemonic>,
+
+    /// Storage paths to the common nym-api files
+    #[zeroize(skip)]
+    pub storage_paths: NymApiPaths,
 }
 
 impl Base {
@@ -240,13 +250,13 @@ impl Base {
             .parse()
             .expect("default local validator is malformed!");
 
+        let id = id.into();
+
         Base {
-            id: id.into(),
+            storage_paths: NymApiPaths::new_default(&id),
+            id,
             local_validator: default_validator,
-            mixnet_contract_address: mainnet::MIXNET_CONTRACT_ADDRESS.parse().unwrap(),
-            vesting_contract_address: mainnet::VESTING_CONTRACT_ADDRESS.parse().unwrap(),
-            // this this doesn't make any sense since you really have a mnemonic beforehand...
-            mnemonic: bip39::Mnemonic::generate(24).unwrap(),
+            mnemonic: None,
         }
     }
 }
@@ -399,12 +409,19 @@ pub struct TopologyCacher {
 pub struct TopologyCacherDebug {
     #[serde(with = "humantime_serde")]
     pub caching_interval: Duration,
+
+    #[serde(with = "humantime_serde")]
+    pub node_describe_caching_interval: Duration,
+
+    pub node_describe_batch_size: usize,
 }
 
 impl Default for TopologyCacherDebug {
     fn default() -> Self {
         TopologyCacherDebug {
             caching_interval: DEFAULT_TOPOLOGY_CACHE_INTERVAL,
+            node_describe_caching_interval: DEFAULT_NODE_DESCRIBE_CACHE_INTERVAL,
+            node_describe_batch_size: DEFAULT_NODE_DESCRIBE_BATCH_SIZE,
         }
     }
 }
@@ -487,7 +504,8 @@ pub struct CoconutSigner {
     /// Specifies whether rewarding service is enabled in this process.
     pub enabled: bool,
 
-    pub announce_address: Url,
+    #[serde(deserialize_with = "de_maybe_stringified")]
+    pub announce_address: Option<Url>,
 
     pub storage_paths: CoconutSignerPaths,
 
@@ -497,17 +515,9 @@ pub struct CoconutSigner {
 
 impl CoconutSigner {
     pub fn new_default<P: AsRef<Path>>(id: P) -> Self {
-        let default_validator: Url = DEFAULT_LOCAL_VALIDATOR
-            .parse()
-            .expect("default local validator is malformed!");
-        let mut default_announce_address = default_validator;
-        default_announce_address
-            .set_port(Some(DEFAULT_NYM_API_PORT))
-            .expect("default local validator is malformed!");
-
         CoconutSigner {
             enabled: false,
-            announce_address: default_announce_address,
+            announce_address: None,
             storage_paths: CoconutSignerPaths::new_default(id),
             debug: Default::default(),
         }

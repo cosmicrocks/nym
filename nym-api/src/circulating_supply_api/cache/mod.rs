@@ -1,11 +1,11 @@
 // Copyright 2022-2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use self::data::CirculatingSupplyCacheData;
 use cosmwasm_std::Addr;
 use nym_api_requests::models::CirculatingSupplyResponse;
+use nym_validator_client::nyxd::error::NyxdError;
 use nym_validator_client::nyxd::Coin;
-use nym_validator_client::ValidatorClientError;
 use rocket::fairing::AdHoc;
 use std::ops::Deref;
 use std::{
@@ -34,7 +34,7 @@ enum CirculatingSupplyCacheError {
     #[error(transparent)]
     ClientError {
         #[from]
-        source: ValidatorClientError,
+        source: NyxdError,
     },
 }
 
@@ -85,8 +85,10 @@ impl CirculatingSupplyCache {
         log::info!("the number of tokens still vesting is now {vesting_tokens}");
         log::info!("the circulating supply is now {circulating_supply}");
 
-        cache.mixmining_reserve.update(mixmining_reserve);
-        cache.vesting_tokens.update(vesting_tokens);
-        cache.circulating_supply.update(circulating_supply);
+        cache.mixmining_reserve.unchecked_update(mixmining_reserve);
+        cache.vesting_tokens.unchecked_update(vesting_tokens);
+        cache
+            .circulating_supply
+            .unchecked_update(circulating_supply);
     }
 }

@@ -28,7 +28,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::{self, net::TcpStream};
+use tokio::net::TcpStream;
 
 #[pin_project(project = StateProject)]
 enum StreamState {
@@ -507,8 +507,8 @@ impl SocksClient {
                 );
             }
 
-            SocksCommand::Bind => unimplemented!(), // not handled
-            SocksCommand::UdpAssociate => unimplemented!(), // not handled
+            SocksCommand::Bind => return Err(SocksProxyError::BindNotSupported), // not handled
+            SocksCommand::UdpAssociate => return Err(SocksProxyError::UdpNotSupported),
         };
 
         Ok(())

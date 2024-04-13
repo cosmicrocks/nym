@@ -8,6 +8,7 @@ use self::{
     sent_notification_listener::SentNotificationListener,
 };
 use crate::client::inbound_messages::InputMessageReceiver;
+use crate::client::packet_statistics_control::PacketStatisticsReporter;
 use crate::client::real_messages_control::message_handler::MessageHandler;
 use crate::client::replies::reply_controller::ReplyControllerSender;
 use crate::spawn_future;
@@ -69,6 +70,7 @@ pub(crate) struct PendingAcknowledgement {
     message_chunk: Fragment,
     delay: SphinxDelay,
     destination: PacketDestination,
+    mix_hops: Option<u8>,
 }
 
 impl PendingAcknowledgement {
@@ -77,11 +79,13 @@ impl PendingAcknowledgement {
         message_chunk: Fragment,
         delay: SphinxDelay,
         recipient: Recipient,
+        mix_hops: Option<u8>,
     ) -> Self {
         PendingAcknowledgement {
             message_chunk,
             delay,
             destination: PacketDestination::KnownRecipient(recipient.into()),
+            mix_hops,
         }
     }
 
@@ -98,6 +102,9 @@ impl PendingAcknowledgement {
                 recipient_tag,
                 extra_surb_request,
             },
+            // Messages sent using SURBs are using the number of mix hops set by the recipient when
+            // they provided the SURBs, so it doesn't make sense to include it here.
+            mix_hops: None,
         }
     }
 
@@ -202,6 +209,7 @@ where
         connectors: AcknowledgementControllerConnectors,
         message_handler: MessageHandler<R>,
         reply_controller_sender: ReplyControllerSender,
+        stats_tx: PacketStatisticsReporter,
     ) -> Self {
         let (retransmission_tx, retransmission_rx) = mpsc::unbounded();
 
@@ -218,6 +226,7 @@ where
             Arc::clone(&ack_key),
             connectors.ack_receiver,
             connectors.ack_action_sender.clone(),
+            stats_tx,
         );
 
         // will listen for any new messages from the client
@@ -260,7 +269,7 @@ where
         let mut sent_notification_listener = self.sent_notification_listener;
         let mut action_controller = self.action_controller;
 
-        let shutdown_handle = shutdown.clone();
+        let shutdown_handle = shutdown.fork("acknowledgement_listener");
         spawn_future(async move {
             acknowledgement_listener
                 .run_with_shutdown(shutdown_handle)
@@ -268,7 +277,7 @@ where
             debug!("The acknowledgement listener has finished execution!");
         });
 
-        let shutdown_handle = shutdown.clone();
+        let shutdown_handle = shutdown.fork("input_message_listener");
         spawn_future(async move {
             input_message_listener
                 .run_with_shutdown(shutdown_handle)
@@ -276,7 +285,7 @@ where
             debug!("The input listener has finished execution!");
         });
 
-        let shutdown_handle = shutdown.clone();
+        let shutdown_handle = shutdown.fork("retransmission_request_listener");
         spawn_future(async move {
             retransmission_request_listener
                 .run_with_shutdown(shutdown_handle, packet_type)
@@ -284,7 +293,7 @@ where
             debug!("The retransmission request listener has finished execution!");
         });
 
-        let shutdown_handle = shutdown.clone();
+        let shutdown_handle = shutdown.fork("sent_notification_listener");
         spawn_future(async move {
             sent_notification_listener
                 .run_with_shutdown(shutdown_handle)
@@ -293,7 +302,9 @@ where
         });
 
         spawn_future(async move {
-            action_controller.run_with_shutdown(shutdown).await;
+            action_controller
+                .run_with_shutdown(shutdown.with_suffix("action_controller"))
+                .await;
             debug!("The controller has finished execution!");
         });
     }

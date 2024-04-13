@@ -1,17 +1,21 @@
 use futures::{channel::mpsc, StreamExt};
-use nym_client_core::client::base_client::storage::gateway_details::GatewayDetailsStore;
-use nym_client_core::client::base_client::storage::{MixnetClientStorage, OnDiskPersistent};
-use nym_client_core::{config::GatewayEndpointConfig, error::ClientCoreStatusMessage};
-use nym_socks5_client_core::NymClient as Socks5NymClient;
-use nym_socks5_client_core::Socks5ControlMessageSender;
+use nym_client_core::client::base_client::storage::gateways_storage::{
+    GatewayDetails, GatewaysDetailsStore,
+};
+use nym_client_core::{
+    client::base_client::storage::{MixnetClientStorage, OnDiskPersistent},
+    config::{GroupBy, TopologyStructure},
+    error::ClientCoreStatusMessage,
+};
+use nym_socks5_client_core::{NymClient as Socks5NymClient, Socks5ControlMessageSender};
 use nym_sphinx::params::PacketSize;
 use nym_task::manager::TaskStatus;
 use std::sync::Arc;
 use tap::TapFallible;
 use tokio::sync::RwLock;
 
-use crate::config::{Config, PrivacyLevel};
 use crate::{
+    config::{Config, PrivacyLevel},
     error::Result,
     events::{self, emit_event, emit_status_event},
     models::{ConnectionStatusKind, ConnectivityTestResult},
@@ -46,6 +50,19 @@ fn override_config_from_env(config: &mut Config, privacy_level: &PrivacyLevel) {
 
         log::warn!("Disabling per-hop delay");
         config.core.base.set_no_per_hop_delays();
+
+        // TODO: selectable in the UI
+        let address = config
+            .core
+            .socks5
+            .provider_mix_address
+            .parse()
+            .expect("failed to parse provider mix address");
+        log::warn!("Using geo-aware mixnode selection based on the location of: {address}");
+        config
+            .core
+            .base
+            .set_topology_structure(TopologyStructure::GeoAware(GroupBy::NymAddress(address)));
     }
 }
 
@@ -57,7 +74,7 @@ pub async fn start_nym_socks5_client(
     Socks5ControlMessageSender,
     nym_task::StatusReceiver,
     ExitStatusReceiver,
-    GatewayEndpointConfig,
+    GatewayDetails,
 )> {
     log::info!("Loading config from file: {id}");
     let mut config = Config::read_from_default_path(id)
@@ -73,10 +90,12 @@ pub async fn start_nym_socks5_client(
 
     let used_gateway = storage
         .gateway_details_store()
-        .load_gateway_details()
+        .active_gateway()
         .await
-        .expect("failed to load gateway details")
-        .into();
+        .expect("failed to load active gateway details")
+        .registration
+        .expect("no active gateway set")
+        .details;
 
     log::info!("Starting socks5 client");
 
@@ -97,7 +116,7 @@ pub async fn start_nym_socks5_client(
         let result = tokio::runtime::Runtime::new()
             .expect("Failed to create runtime for SOCKS5 client")
             .block_on(async move {
-                let socks5_client = Socks5NymClient::new(config.core, storage);
+                let socks5_client = Socks5NymClient::new(config.core, storage, None);
 
                 socks5_client
                     .run_and_listen(socks5_ctrl_rx, socks5_status_tx)

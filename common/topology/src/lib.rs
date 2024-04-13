@@ -1,7 +1,11 @@
 // Copyright 2021-2023 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(unknown_lints)]
+// clippy::to_string_trait_impl is not on stable as of 1.77
+
 use crate::filter::VersionFilterable;
+pub use error::NymTopologyError;
 use log::warn;
 use nym_mixnet_contract_common::mixnode::MixNodeDetails;
 use nym_mixnet_contract_common::{GatewayBond, IdentityKeyRef, MixId};
@@ -10,11 +14,15 @@ use nym_sphinx_types::Node as SphinxNode;
 use rand::prelude::SliceRandom;
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeMap;
-use std::convert::TryInto;
+
 use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
+
+#[cfg(feature = "serializable")]
+use ::serde::{Deserialize, Deserializer, Serialize, Serializer};
+use nym_api_requests::models::DescribedGateway;
 
 pub mod error;
 pub mod filter;
@@ -25,7 +33,47 @@ pub mod random_route_provider;
 #[cfg(feature = "provider-trait")]
 pub mod provider_trait;
 
-pub use error::NymTopologyError;
+#[cfg(feature = "serializable")]
+pub(crate) mod serde;
+
+#[cfg(feature = "serializable")]
+pub use crate::serde::{
+    SerializableGateway, SerializableMixNode, SerializableNymTopology, SerializableTopologyError,
+};
+
+#[cfg(feature = "provider-trait")]
+pub use provider_trait::{HardcodedTopologyProvider, TopologyProvider};
+
+#[derive(Debug, Default, Clone)]
+pub enum NodeVersion {
+    Explicit(semver::Version),
+
+    #[default]
+    Unknown,
+}
+
+// this is only implemented for backwards compatibility so we wouldn't need to change everything at once
+// (also I intentionally implemented `ToString` as opposed to `Display`)
+#[allow(clippy::to_string_trait_impl)]
+impl ToString for NodeVersion {
+    fn to_string(&self) -> String {
+        match self {
+            NodeVersion::Explicit(semver) => semver.to_string(),
+            NodeVersion::Unknown => String::new(),
+        }
+    }
+}
+
+// this is also for backwards compat.
+impl<'a> From<&'a str> for NodeVersion {
+    fn from(value: &'a str) -> Self {
+        if let Ok(semver) = value.parse() {
+            NodeVersion::Explicit(semver)
+        } else {
+            NodeVersion::Unknown
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum NetworkAddress {
@@ -76,6 +124,23 @@ pub struct NymTopology {
 impl NymTopology {
     pub fn new(mixes: BTreeMap<MixLayer, Vec<mix::Node>>, gateways: Vec<gateway::Node>) -> Self {
         NymTopology { mixes, gateways }
+    }
+
+    pub fn new_unordered(unordered_mixes: Vec<mix::Node>, gateways: Vec<gateway::Node>) -> Self {
+        let mut mixes = BTreeMap::new();
+        for node in unordered_mixes.into_iter() {
+            let layer = node.layer as MixLayer;
+            let layer_entry = mixes.entry(layer).or_insert_with(Vec::new);
+            layer_entry.push(node)
+        }
+
+        NymTopology { mixes, gateways }
+    }
+
+    #[cfg(feature = "serializable")]
+    pub fn new_from_file<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        serde_json::from_reader(file).map_err(Into::into)
     }
 
     pub fn from_detailed(
@@ -131,12 +196,16 @@ impl NymTopology {
     }
 
     pub fn mixes_in_layer(&self, layer: MixLayer) -> Vec<mix::Node> {
-        assert!(vec![1, 2, 3].contains(&layer));
+        assert!([1, 2, 3].contains(&layer));
         self.mixes.get(&layer).unwrap().to_owned()
     }
 
     pub fn gateways(&self) -> &[gateway::Node] {
         &self.gateways
+    }
+
+    pub fn get_gateways(&self) -> Vec<gateway::Node> {
+        self.gateways.clone()
     }
 
     pub fn get_gateway(&self, gateway_identity: &NodeIdentity) -> Option<&gateway::Node> {
@@ -318,10 +387,54 @@ impl NymTopology {
     }
 }
 
-pub fn nym_topology_from_detailed(
+#[cfg(feature = "serializable")]
+impl Serialize for NymTopology {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        crate::serde::SerializableNymTopology::from(self.clone()).serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serializable")]
+impl<'de> Deserialize<'de> for NymTopology {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let serializable = crate::serde::SerializableNymTopology::deserialize(deserializer)?;
+        serializable.try_into().map_err(::serde::de::Error::custom)
+    }
+}
+
+pub trait IntoGatewayNode: TryInto<gateway::Node>
+where
+    <Self as TryInto<gateway::Node>>::Error: Display,
+{
+    fn identity(&self) -> IdentityKeyRef;
+}
+
+impl IntoGatewayNode for GatewayBond {
+    fn identity(&self) -> IdentityKeyRef {
+        &self.gateway.identity_key
+    }
+}
+
+impl IntoGatewayNode for DescribedGateway {
+    fn identity(&self) -> IdentityKeyRef {
+        &self.bond.gateway.identity_key
+    }
+}
+
+pub fn nym_topology_from_detailed<G>(
     mix_details: Vec<MixNodeDetails>,
-    gateway_bonds: Vec<GatewayBond>,
-) -> NymTopology {
+    gateway_bonds: Vec<G>,
+) -> NymTopology
+where
+    G: IntoGatewayNode,
+    <G as TryInto<gateway::Node>>::Error: Display,
+{
     let mut mixes = BTreeMap::new();
     for bond in mix_details
         .into_iter()
@@ -330,8 +443,8 @@ pub fn nym_topology_from_detailed(
         let layer = bond.layer as MixLayer;
         if layer == 0 || layer > 3 {
             warn!(
-                "{} says it's on invalid layer {}!",
-                bond.mix_node.identity_key, layer
+                "{} says it's on invalid layer {layer}!",
+                bond.mix_node.identity_key
             );
             continue;
         }
@@ -342,7 +455,7 @@ pub fn nym_topology_from_detailed(
         match bond.try_into() {
             Ok(mix) => layer_entry.push(mix),
             Err(err) => {
-                warn!("Mix {} / {} is malformed - {err}", mix_id, mix_identity);
+                warn!("Mix {mix_id} / {mix_identity} is malformed: {err}");
                 continue;
             }
         }
@@ -350,11 +463,11 @@ pub fn nym_topology_from_detailed(
 
     let mut gateways = Vec::with_capacity(gateway_bonds.len());
     for bond in gateway_bonds.into_iter() {
-        let gate_id = bond.gateway.identity_key.clone();
+        let gate_id = bond.identity().to_owned();
         match bond.try_into() {
             Ok(gate) => gateways.push(gate),
             Err(err) => {
-                warn!("Gateway {} is malformed - {err}", gate_id);
+                warn!("Gateway {gate_id} is malformed: {err}");
                 continue;
             }
         }
@@ -390,7 +503,7 @@ mod converting_mixes_to_vec {
                 )
                 .unwrap(),
                 layer: Layer::One,
-                version: "0.x.0".to_string(),
+                version: "0.2.0".into(),
             };
 
             let node2 = mix::Node {

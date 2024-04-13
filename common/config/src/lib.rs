@@ -4,7 +4,7 @@
 use handlebars::{Handlebars, TemplateRenderError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fs::File;
+use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -15,35 +15,44 @@ pub use toml::de::Error as TomlDeError;
 pub mod defaults;
 pub mod helpers;
 pub mod legacy_helpers;
+pub mod serde_helpers;
 
 pub const NYM_DIR: &str = ".nym";
+pub const DEFAULT_NYM_APIS_DIR: &str = "nym-api";
 pub const DEFAULT_CONFIG_DIR: &str = "config";
 pub const DEFAULT_DATA_DIR: &str = "data";
 pub const DEFAULT_CONFIG_FILENAME: &str = "config.toml";
 
 #[cfg(feature = "dirs")]
 pub fn must_get_home() -> PathBuf {
-    dirs::home_dir().expect("Failed to evaluate $HOME value")
+    if let Some(home_dir) = std::env::var_os("NYM_HOME_DIR") {
+        home_dir.into()
+    } else {
+        dirs::home_dir().expect("Failed to evaluate $HOME value")
+    }
 }
 
 #[cfg(feature = "dirs")]
 pub fn may_get_home() -> Option<PathBuf> {
-    dirs::home_dir()
+    if let Some(home_dir) = std::env::var_os("NYM_HOME_DIR") {
+        Some(home_dir.into())
+    } else {
+        dirs::home_dir()
+    }
 }
 
 pub trait NymConfigTemplate: Serialize {
-    fn template() -> &'static str;
+    fn template(&self) -> &'static str;
 
     fn format_to_string(&self) -> String {
         // it is responsibility of whoever is implementing the trait to ensure the template is valid
         Handlebars::new()
-            .render_template(Self::template(), &self)
+            .render_template(self.template(), &self)
             .unwrap()
     }
 
     fn format_to_writer<W: Write>(&self, writer: W) -> io::Result<()> {
-        if let Err(err) =
-            Handlebars::new().render_template_to_write(Self::template(), &self, writer)
+        if let Err(err) = Handlebars::new().render_template_to_write(self.template(), &self, writer)
         {
             match err {
                 TemplateRenderError::IOError(err, _) => return Err(err),
@@ -63,16 +72,22 @@ where
     C: NymConfigTemplate,
     P: AsRef<Path>,
 {
-    log::trace!("trying to save config file to {}", path.as_ref().display());
-    let file = File::create(path.as_ref())?;
+    let path = path.as_ref();
+    log::info!("saving config file to {}", path.display());
 
-    // TODO: check for whether any of our configs stores anything sensitive
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+
+    let file = File::create(path)?;
+
+    // TODO: check for whether any of our configs store anything sensitive
     // and change that to 0o644 instead
     #[cfg(target_family = "unix")]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut perms = fs::metadata(path.as_ref())?.permissions();
+        let mut perms = fs::metadata(path)?.permissions();
         perms.set_mode(0o600);
         fs::set_permissions(path, perms)?;
     }
@@ -107,7 +122,7 @@ where
 //
 //
 // pub trait NymConfig: Default + Serialize + DeserializeOwned {
-//     fn template() -> &'static str;
+//     fn template(&self) -> &'static str;
 //
 //     fn config_file_name() -> String {
 //         "config.toml".to_string()

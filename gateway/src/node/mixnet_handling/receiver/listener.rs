@@ -1,5 +1,5 @@
 // Copyright 2020 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::node::mixnet_handling::receiver::connection_handler::ConnectionHandler;
 use crate::node::storage::Storage;
@@ -43,7 +43,7 @@ impl Listener {
                     match connection {
                         Ok((socket, remote_addr)) => {
                             let handler = connection_handler.clone();
-                            tokio::spawn(handler.handle_connection(socket, remote_addr, self.shutdown.clone()));
+                            tokio::spawn(handler.handle_connection(socket, remote_addr, self.shutdown.clone().named(format!("MixnetConnectionHandler_{remote_addr}"))));
                         }
                         Err(err) => warn!("failed to get client: {err}"),
                     }

@@ -1,19 +1,17 @@
 // Copyright 2020-2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
-use crate::commands::{ensure_correct_bech32_prefix, OverrideConfig};
-use crate::error::GatewayError;
-use crate::support::config::build_config;
-use crate::{
-    commands::ensure_config_version_compatibility, config::persistence::paths::GatewayPaths,
+use crate::commands::helpers::{
+    ensure_correct_bech32_prefix, try_load_current_config, try_override_config, OverrideConfig,
 };
 use anyhow::{bail, Result};
 use clap::{ArgGroup, Args};
 use nym_bin_common::output_format::OutputFormat;
 use nym_crypto::asymmetric::identity;
+use nym_gateway::error::GatewayError;
+use nym_gateway::helpers::load_identity_keys;
 use nym_types::helpers::ConsoleSigningOutput;
 use nym_validator_client::nyxd;
-use std::error::Error;
 
 #[derive(Args, Clone)]
 #[clap(group(ArgGroup::new("sign").required(true).args(&["wallet_address", "text", "contract_msg"])))]
@@ -64,16 +62,6 @@ impl TryFrom<Sign> for SignedTarget {
     }
 }
 
-pub fn load_identity_keys(paths: &GatewayPaths) -> identity::KeyPair {
-    let identity_keypair: identity::KeyPair =
-        nym_pemstore::load_keypair(&nym_pemstore::KeyPairPath::new(
-            paths.private_identity_key().to_owned(),
-            paths.public_identity_key().to_owned(),
-        ))
-        .expect("Failed to read stored identity key files");
-    identity_keypair
-}
-
 fn print_signed_address(
     private_key: &identity::PrivateKey,
     wallet_address: nyxd::AccountId,
@@ -90,14 +78,11 @@ fn print_signed_text(
     text: &str,
     output: OutputFormat,
 ) -> Result<(), GatewayError> {
-    eprintln!(
-        "Signing the text {:?} using your mixnode's Ed25519 identity key...",
-        text
-    );
+    eprintln!("Signing the text {text:?} using your mixnode's Ed25519 identity key...",);
 
     let signature = private_key.sign_text(text);
     let sign_output = ConsoleSigningOutput::new(text, signature);
-    println!("{}", output.format(&sign_output));
+    output.to_stdout(&sign_output);
 
     Ok(())
 }
@@ -125,6 +110,7 @@ fn print_signed_contract_msg(
     };
 
     // if this is a valid json, it MUST be a valid string
+    #[allow(clippy::unwrap_used)]
     let decoded_string = String::from_utf8(decoded.clone()).unwrap();
     let signature = private_key.sign(&decoded).to_base58_string();
 
@@ -132,14 +118,14 @@ fn print_signed_contract_msg(
     println!("{}", output.format(&sign_output));
 }
 
-pub fn execute(args: Sign) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let config = build_config(args.id.clone(), OverrideConfig::default())?;
-    ensure_config_version_compatibility(&config)?;
+pub fn execute(args: Sign) -> anyhow::Result<()> {
+    let mut config = try_load_current_config(&args.id)?;
+    config = try_override_config(config, OverrideConfig::default())?;
 
     let output = args.output;
     let signed_target = SignedTarget::try_from(args)?;
 
-    let identity_keypair = load_identity_keys(&config.storage_paths);
+    let identity_keypair = load_identity_keys(&config)?;
 
     match signed_target {
         SignedTarget::Text(text) => {

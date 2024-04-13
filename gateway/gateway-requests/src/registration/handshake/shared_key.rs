@@ -30,7 +30,7 @@ pub struct SharedKeys {
     mac_key: MacKey,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Copy, Error)]
 pub enum SharedKeyConversionError {
     #[error("the string representation of the shared keys was malformed - {0}")]
     DecodeError(#[from] bs58::decode::Error),
@@ -85,10 +85,7 @@ impl SharedKeys {
         let mac =
             compute_keyed_hmac::<GatewayIntegrityHmacAlgorithm>(self.mac_key(), &encrypted_data);
 
-        mac.into_bytes()
-            .into_iter()
-            .chain(encrypted_data.into_iter())
-            .collect()
+        mac.into_bytes().into_iter().chain(encrypted_data).collect()
     }
 
     pub fn decrypt_tagged(

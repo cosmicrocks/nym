@@ -1,30 +1,29 @@
 // Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_arch = "wasm32")]
+use gloo_utils::errors::JsError;
 use nym_gateway_requests::registration::handshake::error::HandshakeError;
 use std::io;
 use thiserror::Error;
 use tungstenite::Error as WsError;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsValue;
 
 #[derive(Debug, Error)]
 pub enum GatewayClientError {
     #[error("Connection to the gateway is not established")]
     ConnectionNotEstablished,
 
-    #[error("Gateway returned an error response - {0}")]
+    #[error("Gateway returned an error response: {0}")]
     GatewayError(String),
 
-    #[error("There was a network error - {0}")]
+    #[error("There was a network error: {0}")]
     NetworkError(#[from] WsError),
 
-    // TODO: see if `JsValue` is a reasonable type for this
     #[cfg(target_arch = "wasm32")]
-    #[error("There was a network error")]
-    NetworkErrorWasm(JsValue),
+    #[error("There was a network error: {0}")]
+    NetworkErrorWasm(#[from] JsError),
 
-    #[error("Invalid URL - {0}")]
+    #[error("Invalid URL: {0}")]
     InvalidURL(String),
 
     #[error("No shared key was provided or obtained")]
@@ -33,7 +32,7 @@ pub enum GatewayClientError {
     #[error("No bandwidth controller provided")]
     NoBandwidthControllerAvailable,
 
-    #[error("Bandwidth controller error - {0}")]
+    #[error("Bandwidth controller error: {0}")]
     BandwidthControllerError(#[from] nym_bandwidth_controller::error::BandwidthControllerError),
 
     #[error("Connection was abruptly closed")]
@@ -47,6 +46,9 @@ pub enum GatewayClientError {
 
     #[error("Credential could not be serialized")]
     SerializeCredential,
+
+    #[error("can not spend bandwidth credential with the gateway as it's using outdated protocol (version: {negotiated_protocol:?})")]
+    OutdatedGatewayCredentialVersion { negotiated_protocol: Option<u8> },
 
     #[error("Client is not authenticated")]
     NotAuthenticated,
@@ -63,7 +65,7 @@ pub enum GatewayClientError {
     #[error("Connection is in an invalid state - please send a bug report")]
     ConnectionInInvalidState,
 
-    #[error("Failed to finish registration handshake - {0}")]
+    #[error("Failed to finish registration handshake: {0}")]
     RegistrationFailure(HandshakeError),
 
     #[error("Authentication failure")]
@@ -77,6 +79,16 @@ pub enum GatewayClientError {
 
     #[error("Attempted to negotiate connection with gateway using incompatible protocol version. Ours is {current} and the gateway reports {gateway:?}")]
     IncompatibleProtocol { gateway: Option<u8>, current: u8 },
+
+    #[error(
+        "The packet router hasn't been set - are you sure you started up the client correctly?"
+    )]
+    PacketRouterUnavailable,
+
+    #[error(
+        "this operation couldn't be completed as the program is in the process of shutting down"
+    )]
+    ShutdownInProgress,
 }
 
 impl GatewayClientError {

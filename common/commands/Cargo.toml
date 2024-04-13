@@ -3,36 +3,44 @@ name = "nym-cli-commands"
 version = "1.0.0"
 authors.workspace = true
 edition = "2021"
+license.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 base64 = "0.13.0"
 bip39 = { workspace = true }
-bs58 = "0.4"
+bs58 = { workspace = true }
 comfy-table = "6.0.0"
 cfg-if = "1.0.0"
-clap = { version = "4.0", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
+csv = "1.3.0"
 cw-utils = { workspace = true }
+futures = { workspace = true }
 handlebars = "3.0.1"
-humantime-serde = "1.0"
+humantime-serde = { workspace = true }
+inquire = "0.6.2"
 k256 = { workspace = true, features = ["ecdsa", "sha256"] }
 log = { workspace = true }
 rand = {version = "0.6", features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { workspace = true }
-thiserror = "1"
-time = { version = "0.3.6", features = ["parsing", "formatting"] }
+thiserror = { workspace = true }
+time = { workspace = true, features = ["parsing", "formatting"] }
+tokio = { workspace = true, features = ["sync"]}
 toml = "0.5.6"
-url = "2.2"
+url = { workspace = true }
 tap = "1"
+zeroize = { workspace = true }
 
 cosmrs = { workspace = true }
 cosmwasm-std = { workspace = true }
 
-nym-validator-client = { path = "../client-libs/validator-client", features = ["signing", "http-client"] }
+nym-validator-client = { path = "../client-libs/validator-client" }
 nym-bin-common = { path = "../../common/bin-common", features = ["output_format"] }
 nym-crypto = { path = "../../common/crypto", features = ["asymmetric"] }
 nym-network-defaults = { path = "../network-defaults" }
 nym-contracts-common = { path = "../cosmwasm-smart-contracts/contracts-common" }
+nym-bandwidth-controller = { path = "../../common/bandwidth-controller" }
 nym-mixnet-contract-common = { path = "../cosmwasm-smart-contracts/mixnet-contract" }
 nym-vesting-contract-common = { path = "../cosmwasm-smart-contracts/vesting-contract" }
 nym-coconut-bandwidth-contract-common = { path = "../cosmwasm-smart-contracts/coconut-bandwidth-contract" }
@@ -41,6 +49,13 @@ nym-multisig-contract-common = { path = "../cosmwasm-smart-contracts/multisig-co
 nym-service-provider-directory-common = { path = "../cosmwasm-smart-contracts/service-provider-directory" }
 nym-name-service-common = { path = "../cosmwasm-smart-contracts/name-service" }
 nym-sphinx = { path = "../../common/nymsphinx" }
+nym-client-core = { path = "../../common/client-core" }
+nym-config = { path = "../../common/config" }
+nym-credentials = { path = "../../common/credentials" }
+nym-credentials-interface = { path = "../../common/credentials-interface" }
+nym-credential-storage = { path = "../../common/credential-storage" }
+nym-credential-utils = { path = "../../common/credential-utils" }
+nym-id = { path = "../nym-id" }
 
 nym-pemstore = { path = "../../common/pemstore", version = "0.3.0" }
 nym-types = { path = "../../common/types" }

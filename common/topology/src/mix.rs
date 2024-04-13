@@ -1,13 +1,14 @@
 // Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{filter, NetworkAddress};
+use crate::{filter, NetworkAddress, NodeVersion};
 use nym_crypto::asymmetric::{encryption, identity};
 pub use nym_mixnet_contract_common::Layer;
 use nym_mixnet_contract_common::{MixId, MixNodeBond};
 use nym_sphinx_addressing::nodes::NymNodeRoutingAddress;
 use nym_sphinx_types::Node as SphinxNode;
-use std::convert::{TryFrom, TryInto};
+
+use std::fmt::Formatter;
 use std::io;
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -28,7 +29,7 @@ pub enum MixnodeConversionError {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Node {
     pub mix_id: MixId,
     pub owner: String,
@@ -39,7 +40,22 @@ pub struct Node {
     pub identity_key: identity::PublicKey,
     pub sphinx_key: encryption::PublicKey, // TODO: or nymsphinx::PublicKey? both are x25519
     pub layer: Layer,
-    pub version: String,
+    pub version: NodeVersion,
+}
+
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("mix::Node")
+            .field("mix_id", &self.mix_id)
+            .field("owner", &self.owner)
+            .field("host", &self.host)
+            .field("mix_host", &self.mix_host)
+            .field("identity_key", &self.identity_key.to_base58_string())
+            .field("sphinx_key", &self.sphinx_key.to_base58_string())
+            .field("layer", &self.layer)
+            .field("version", &self.version)
+            .finish()
+    }
 }
 
 impl Node {
@@ -66,7 +82,8 @@ impl Node {
 
 impl filter::Versioned for Node {
     fn version(&self) -> String {
-        self.version.clone()
+        // TODO: return semver instead
+        self.version.to_string()
     }
 }
 
@@ -98,7 +115,7 @@ impl<'a> TryFrom<&'a MixNodeBond> for Node {
             identity_key: identity::PublicKey::from_base58_string(&bond.mix_node.identity_key)?,
             sphinx_key: encryption::PublicKey::from_base58_string(&bond.mix_node.sphinx_key)?,
             layer: bond.layer,
-            version: bond.mix_node.version.clone(),
+            version: bond.mix_node.version.as_str().into(),
         })
     }
 }

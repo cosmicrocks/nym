@@ -6,14 +6,13 @@
 //! # Basic example
 //!
 //! ```no_run
-//! use nym_sdk::mixnet;
+//! use nym_sdk::mixnet::{self, MixnetMessageSender};
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     let mixnet_client = mixnet::MixnetClientBuilder::new_ephemeral()
 //!         .enable_credentials_mode()
 //!         .build()
-//!         .await
 //!         .unwrap();
 //!
 //!     let bandwidth_client = mixnet_client.create_bandwidth_client(String::from("my super secret mnemonic")).unwrap();
@@ -27,7 +26,7 @@
 //!     let our_address = client.nym_address();
 //!
 //!     // Send a message throughout the mixnet to ourselves
-//!     client.send_str(*our_address, "hello there").await;
+//!     client.send_plain_message(*our_address, "hello there").await.unwrap();
 //!
 //!     println!("Waiting for message");
 //!     if let Some(received) = client.wait_for_messages().await {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::storage::{
-    add_family_member, get_family, is_any_member, is_family_member, remove_family_member,
+    add_family_member, is_any_member, is_family_member, must_get_family, remove_family_member,
     save_family,
 };
 use crate::families::queries::get_family_by_label;
@@ -48,12 +48,15 @@ fn _try_create_family(
     let family_head = FamilyHead::new(existing_bond.identity());
 
     // can't overwrite existing family
-    if get_family(&family_head, deps.storage).is_ok() {
+    if must_get_family(&family_head, deps.storage).is_ok() {
         return Err(MixnetContractError::FamilyCanHaveOnlyOne);
     }
 
     // the label must be unique
-    if get_family_by_label(label.clone(), deps.storage)?.is_some() {
+    if get_family_by_label(label.clone(), deps.storage)?
+        .family
+        .is_some()
+    {
         return Err(MixnetContractError::FamilyWithLabelExists(label));
     }
 
@@ -118,7 +121,7 @@ fn _try_join_family(
         join_permit,
     )?;
 
-    let family = get_family(&family_head, deps.storage)?;
+    let family = must_get_family(&family_head, deps.storage)?;
 
     add_family_member(&family, deps.storage, existing_bond.identity())?;
 
@@ -162,7 +165,7 @@ fn _try_leave_family(
         });
     }
 
-    let family = get_family(&family_head, deps.storage)?;
+    let family = must_get_family(&family_head, deps.storage)?;
     if !is_family_member(deps.storage, &family, existing_bond.identity())? {
         return Err(MixnetContractError::NotAMember {
             head: family_head.identity().to_string(),
@@ -215,7 +218,7 @@ fn _try_head_kick_member(
 
     // get the family details
     let family_head = FamilyHead::new(head_bond.identity());
-    let family = get_family(&family_head, deps.storage)?;
+    let family = must_get_family(&family_head, deps.storage)?;
 
     // make sure the member we're trying to kick is an actual member
     if !is_family_member(deps.storage, &family, &member)? {
@@ -233,8 +236,7 @@ fn _try_head_kick_member(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::families::queries::{get_family_by_head, get_family_by_label};
-    use crate::families::storage::is_family_member;
+    use crate::families::queries::get_family_by_head;
     use crate::mixnet_contract_settings::storage::minimum_mixnode_pledge;
     use crate::support::tests::fixtures;
     use crate::support::tests::test_helpers::TestSetup;
@@ -290,7 +292,7 @@ mod test {
 
         try_create_family(test.deps_mut(), mock_info(head, &[]), "test".to_string()).unwrap();
         let family_head = FamilyHead::new(&head_mixnode.identity_key);
-        assert!(get_family(&family_head, test.deps().storage).is_ok());
+        assert!(must_get_family(&family_head, test.deps().storage).is_ok());
 
         let nope = try_create_family(
             test.deps_mut(),
@@ -306,12 +308,15 @@ mod test {
             },
         }
 
-        let family = get_family_by_label("test".to_string(), test.deps().storage).unwrap();
+        let family = get_family_by_label("test".to_string(), test.deps().storage)
+            .unwrap()
+            .family;
         assert!(family.is_some());
         assert_eq!(family.unwrap().head_identity(), family_head.identity());
 
         let family = get_family_by_head(family_head.identity(), test.deps().storage)
             .unwrap()
+            .family
             .unwrap();
         assert_eq!(family.head_identity(), family_head.identity());
 
@@ -326,7 +331,7 @@ mod test {
         )
         .unwrap();
 
-        let family = get_family(&family_head, test.deps().storage).unwrap();
+        let family = must_get_family(&family_head, test.deps().storage).unwrap();
 
         assert!(
             is_family_member(test.deps().storage, &family, &member_mixnode.identity_key).unwrap()
@@ -334,7 +339,7 @@ mod test {
 
         try_leave_family(test.deps_mut(), mock_info(member, &[]), family_head.clone()).unwrap();
 
-        let family = get_family(&family_head, test.deps().storage).unwrap();
+        let family = must_get_family(&family_head, test.deps().storage).unwrap();
         assert!(
             !is_family_member(test.deps().storage, &family, &member_mixnode.identity_key).unwrap()
         );
@@ -350,7 +355,7 @@ mod test {
         )
         .unwrap();
 
-        let family = get_family(&family_head, test.deps().storage).unwrap();
+        let family = must_get_family(&family_head, test.deps().storage).unwrap();
 
         assert!(
             is_family_member(test.deps().storage, &family, &member_mixnode.identity_key).unwrap()
@@ -363,7 +368,7 @@ mod test {
         )
         .unwrap();
 
-        let family = get_family(&family_head, test.deps().storage).unwrap();
+        let family = must_get_family(&family_head, test.deps().storage).unwrap();
         assert!(
             !is_family_member(test.deps().storage, &family, &member_mixnode.identity_key).unwrap()
         );
@@ -372,7 +377,6 @@ mod test {
     #[cfg(test)]
     mod creating_family {
         use super::*;
-        use crate::support::tests::test_helpers::TestSetup;
 
         #[test]
         fn fails_for_illegal_proxy() {
@@ -406,7 +410,6 @@ mod test {
     #[cfg(test)]
     mod joining_family {
         use super::*;
-        use crate::support::tests::test_helpers::TestSetup;
 
         #[test]
         fn fails_for_illegal_proxy() {
@@ -429,7 +432,7 @@ mod test {
             );
 
             let head_identity = head_keys.public_key().to_base58_string();
-            let family_head = FamilyHead::new(&head_identity);
+            let family_head = FamilyHead::new(head_identity);
             let res = try_join_family_on_behalf(
                 test.deps_mut(),
                 mock_info(illegal_proxy.as_ref(), &[]),
@@ -452,7 +455,6 @@ mod test {
     #[cfg(test)]
     mod leaving_family {
         use super::*;
-        use crate::support::tests::test_helpers::TestSetup;
 
         #[test]
         fn fails_for_illegal_proxy() {
@@ -475,7 +477,7 @@ mod test {
             );
 
             let head_identity = head_keys.public_key().to_base58_string();
-            let family_head = FamilyHead::new(&head_identity);
+            let family_head = FamilyHead::new(head_identity);
             try_join_family_on_behalf(
                 test.deps_mut(),
                 mock_info(vesting_contract.as_ref(), &[]),
@@ -506,7 +508,6 @@ mod test {
     #[cfg(test)]
     mod kicking_family_member {
         use super::*;
-        use crate::support::tests::test_helpers::TestSetup;
 
         #[test]
         fn fails_for_illegal_proxy() {
@@ -529,7 +530,7 @@ mod test {
             );
 
             let head_identity = head_keys.public_key().to_base58_string();
-            let family_head = FamilyHead::new(&head_identity);
+            let family_head = FamilyHead::new(head_identity);
 
             try_join_family_on_behalf(
                 test.deps_mut(),

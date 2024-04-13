@@ -5,12 +5,16 @@ pub use ed25519_dalek::ed25519::signature::Signature as SignatureTrait;
 pub use ed25519_dalek::SignatureError;
 pub use ed25519_dalek::{Verifier, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SIGNATURE_LENGTH};
 use nym_pemstore::traits::{PemStorableKey, PemStorableKeyPair};
-#[cfg(feature = "sphinx")]
-use nym_sphinx_types::{DestinationAddressBytes, DESTINATION_ADDRESS_LENGTH};
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+#[cfg(feature = "serde")]
+pub mod serde_helpers;
+
+#[cfg(feature = "sphinx")]
+use nym_sphinx_types::{DestinationAddressBytes, DESTINATION_ADDRESS_LENGTH};
 
 #[cfg(feature = "rand")]
 use rand::{CryptoRng, RngCore};
@@ -145,8 +149,19 @@ impl PublicKey {
         Self::from_bytes(&bytes)
     }
 
-    pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), SignatureError> {
-        self.0.verify(message, &signature.0)
+    pub fn verify<M: AsRef<[u8]>>(
+        &self,
+        message: M,
+        signature: &Signature,
+    ) -> Result<(), SignatureError> {
+        self.0.verify(message.as_ref(), &signature.0)
+    }
+}
+
+#[cfg(feature = "sphinx")]
+impl From<PublicKey> for DestinationAddressBytes {
+    fn from(value: PublicKey) -> Self {
+        value.derive_destination_address()
     }
 }
 
@@ -213,6 +228,17 @@ impl<'a> From<&'a PrivateKey> for PublicKey {
 }
 
 impl PrivateKey {
+    #[cfg(feature = "rand")]
+    pub fn new<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
+        let ed25519_secret = ed25519_dalek::SecretKey::generate(rng);
+
+        PrivateKey(ed25519_secret)
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        self.into()
+    }
+
     pub fn to_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
         self.0.to_bytes()
     }
@@ -232,18 +258,17 @@ impl PrivateKey {
         Self::from_bytes(&bytes)
     }
 
-    pub fn sign(&self, message: &[u8]) -> Signature {
+    pub fn sign<M: AsRef<[u8]>>(&self, message: M) -> Signature {
         let expanded_secret_key = ed25519_dalek::ExpandedSecretKey::from(&self.0);
         let public_key: PublicKey = self.into();
-        let sig = expanded_secret_key.sign(message, &public_key.0);
+        let sig = expanded_secret_key.sign(message.as_ref(), &public_key.0);
         Signature(sig)
     }
 
     /// Signs text with the provided Ed25519 private key, returning a base58 signature
     pub fn sign_text(&self, text: &str) -> String {
-        let signature_bytes = self.sign(text.as_ref()).to_bytes();
-        let signature = bs58::encode(signature_bytes).into_string();
-        signature
+        let signature_bytes = self.sign(text).to_bytes();
+        bs58::encode(signature_bytes).into_string()
     }
 }
 
@@ -285,7 +310,7 @@ impl PemStorableKey for PrivateKey {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Signature(ed25519_dalek::Signature);
 
 impl Signature {
@@ -309,6 +334,14 @@ impl Signature {
     }
 }
 
+impl FromStr for Signature {
+    type Err = Ed25519RecoveryError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Signature::from_base58_string(s)
+    }
+}
+
 #[cfg(feature = "serde")]
 impl Serialize for Signature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -327,5 +360,20 @@ impl<'d> Deserialize<'d> for Signature {
     {
         let bytes = <SerdeByteBuf>::deserialize(deserializer)?;
         Signature::from_bytes(bytes.as_ref()).map_err(SerdeError::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    fn assert_zeroize<T: Zeroize>() {}
+
+    #[test]
+    fn private_key_is_zeroized() {
+        assert_zeroize::<PrivateKey>();
+        assert_zeroize_on_drop::<PrivateKey>();
     }
 }

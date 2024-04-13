@@ -11,7 +11,7 @@ use futures::channel::mpsc;
 use futures::StreamExt;
 use log::*;
 use nym_client_core::client::base_client::non_wasm_helpers::default_query_dkg_client_from_config;
-use nym_client_core::client::base_client::storage::gateway_details::GatewayDetailsStore;
+use nym_client_core::client::base_client::storage::GatewaysDetailsStore;
 use nym_client_core::client::base_client::storage::MixnetClientStorage;
 use nym_client_core::client::base_client::{
     BaseClientBuilder, ClientInput, ClientOutput, ClientState,
@@ -19,12 +19,16 @@ use nym_client_core::client::base_client::{
 use nym_client_core::client::key_manager::persistence::KeyStore;
 use nym_client_core::client::replies::reply_storage::ReplyStorageBackend;
 use nym_client_core::config::DebugConfig;
-use nym_client_core::init::GatewaySetup;
+use nym_client_core::init::types::GatewaySetup;
 use nym_credential_storage::storage::Storage as CredentialStorage;
 use nym_sphinx::addressing::clients::Recipient;
 use nym_sphinx::params::PacketType;
-use nym_task::{TaskClient, TaskManager};
+use nym_task::manager::TaskStatus;
+use nym_task::{TaskClient, TaskHandle};
+
+use anyhow::anyhow;
 use std::error::Error;
+use std::path::PathBuf;
 
 pub mod config;
 pub mod error;
@@ -42,7 +46,7 @@ pub enum Socks5ControlMessage {
 
 pub struct StartedSocks5Client {
     /// Handle for managing graceful shutdown of this client. If dropped, the client will be stopped.
-    pub shutdown_handle: TaskManager,
+    pub shutdown_handle: TaskHandle,
 
     /// Address of the started client
     pub address: Recipient,
@@ -56,6 +60,9 @@ pub struct NymClient<S> {
     storage: S,
 
     setup_method: GatewaySetup,
+
+    /// Optional path to a .json file containing standalone network details.
+    custom_mixnet: Option<PathBuf>,
 }
 
 impl<S> NymClient<S>
@@ -64,14 +71,15 @@ where
     S::ReplyStore: Send + Sync,
     <S::ReplyStore as ReplyStorageBackend>::StorageError: Sync + Send,
     <S::CredentialStore as CredentialStorage>::StorageError: Send + Sync,
-    <S::GatewayDetailsStore as GatewayDetailsStore>::StorageError: Sync + Send,
+    <S::GatewaysDetailsStore as GatewaysDetailsStore>::StorageError: Sync + Send,
     <S::KeyStore as KeyStore>::StorageError: Send + Sync,
 {
-    pub fn new(config: Config, storage: S) -> Self {
+    pub fn new(config: Config, storage: S, custom_mixnet: Option<PathBuf>) -> Self {
         NymClient {
             config,
             storage,
-            setup_method: GatewaySetup::MustLoad,
+            setup_method: GatewaySetup::MustLoad { gateway_id: None },
+            custom_mixnet,
         }
     }
 
@@ -116,7 +124,7 @@ where
 
         let authenticator = Authenticator::new(auth_methods, allowed_users);
         let mut sphinx_socks = NymSocksServer::new(
-            socks5_config.listening_port,
+            socks5_config.bind_address,
             authenticator,
             socks5_config.get_provider_mix_address(),
             self_address,
@@ -149,7 +157,7 @@ where
     pub async fn run_forever(self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let started = self.start().await?;
 
-        let res = started.shutdown_handle.catch_interrupt().await;
+        let res = started.shutdown_handle.wait_for_shutdown().await;
         log::info!("Stopping nym-socks5-client");
         res
     }
@@ -162,10 +170,17 @@ where
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Start the main task
         let started = self.start().await?;
-        let mut shutdown = started.shutdown_handle;
+        let mut shutdown = started
+            .shutdown_handle
+            .try_into_task_manager()
+            .ok_or(anyhow!(
+                "attempted to use `run_and_listen` without owning shutdown handle"
+            ))?;
 
         // Listen to status messages from task, that we forward back to the caller
-        shutdown.start_status_listener(sender).await;
+        shutdown
+            .start_status_listener(sender, TaskStatus::Ready)
+            .await;
 
         let res = tokio::select! {
             biased;
@@ -209,9 +224,13 @@ where
             Some(default_query_dkg_client_from_config(&self.config.base))
         };
 
-        let base_builder =
+        let mut base_builder =
             BaseClientBuilder::new(&self.config.base, self.storage, dkg_query_client)
                 .with_gateway_setup(self.setup_method);
+
+        if let Some(custom_mixnet) = &self.custom_mixnet {
+            base_builder = base_builder.with_stored_topology(custom_mixnet)?;
+        }
 
         let packet_type = self.config.base.debug.traffic.packet_type;
         let mut started_client = base_builder.start_base().await?;
@@ -229,7 +248,7 @@ where
             client_output,
             client_state,
             self_address,
-            started_client.task_manager.subscribe(),
+            started_client.task_handle.get_handle(),
             packet_type,
         );
 
@@ -237,7 +256,7 @@ where
         info!("The address of this client is: {self_address}");
 
         Ok(StartedSocks5Client {
-            shutdown_handle: started_client.task_manager,
+            shutdown_handle: started_client.task_handle,
             address: self_address,
         })
     }

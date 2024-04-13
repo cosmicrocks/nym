@@ -9,9 +9,10 @@ use cosmrs::bip32::DerivationPath;
 use itertools::Itertools;
 use nym_config::defaults::{NymNetworkDetails, COSMOS_DERIVATION_PATH};
 use nym_types::account::{Account, AccountEntry, Balance};
+use nym_validator_client::nyxd::CosmWasmClient;
 use nym_validator_client::signing::direct_wallet::DirectSecp256k1HdWallet;
 use nym_validator_client::signing::AccountData;
-use nym_validator_client::{nyxd::DirectSigningNyxdClient, Client};
+use nym_validator_client::DirectSigningHttpRpcValidatorClient;
 use nym_wallet_types::network::Network as WalletNetwork;
 use std::collections::HashMap;
 use strum::IntoEnumIterator;
@@ -35,7 +36,7 @@ pub async fn get_balance(state: tauri::State<'_, WalletState>) -> Result<Balance
 
     match client
         .nyxd
-        .get_balance(address, base_mix_denom.to_string())
+        .get_balance(&address, base_mix_denom.to_string())
         .await?
     {
         Some(coin) => {
@@ -251,7 +252,7 @@ fn create_clients(
     default_api_urls: &HashMap<WalletNetwork, Url>,
     config: &Config,
     mnemonic: &Mnemonic,
-) -> Result<Vec<(WalletNetwork, Client<DirectSigningNyxdClient>)>, BackendError> {
+) -> Result<Vec<(WalletNetwork, DirectSigningHttpRpcValidatorClient)>, BackendError> {
     let mut clients = Vec::new();
     for network in WalletNetwork::iter() {
         let nyxd_url = if let Some(url) = config.get_selected_validator_nyxd_url(network) {
@@ -282,18 +283,13 @@ fn create_clients(
         let network_details = NymNetworkDetails::from(network)
             .clone()
             .with_mixnet_contract(Some(config.get_mixnet_contract_address(network).as_ref()))
-            .with_vesting_contract(Some(config.get_vesting_contract_address(network).as_ref()))
-            .with_bandwidth_claim_contract(Some(
-                config
-                    .get_bandwidth_claim_contract_address(network)
-                    .as_ref(),
-            ));
+            .with_vesting_contract(Some(config.get_vesting_contract_address(network).as_ref()));
 
         let config = nym_validator_client::Config::try_from_nym_network_details(&network_details)?
-            .with_urls(nyxd_url, api_url);
+            .with_urls(nyxd_url, api_url)
+            .with_simulated_gas_multiplier(CUSTOM_SIMULATED_GAS_MULTIPLIER);
 
-        let mut client = nym_validator_client::Client::new_signing(config, mnemonic.clone())?;
-        client.set_nyxd_simulated_gas_multiplier(CUSTOM_SIMULATED_GAS_MULTIPLIER);
+        let client = nym_validator_client::Client::new_signing(config, mnemonic.clone())?;
         clients.push((network, client));
     }
     Ok(clients)
@@ -488,7 +484,8 @@ pub async fn add_account_for_password(
     })
 }
 
-// The first `AccoundId` when converting is the `LoginId` for the entry that was loaded.
+// Set the tauri state with all the accounts in the wallet.
+// NOTE: the first `AccoundId` when converting is the `LoginId` for the entry that was loaded.
 async fn set_state_with_all_accounts(
     stored_login: wallet_storage::StoredLogin,
     first_id_when_converting: wallet_storage::AccountId,
@@ -544,6 +541,28 @@ pub async fn remove_account_for_password(
     wallet_storage::remove_account_from_login(&login_id, &account_id, &password)?;
 
     // Load to reset the internal state
+    let stored_login = wallet_storage::load_existing_login(&login_id, &password)?;
+    // NOTE: Since we removed from a multi-account login, this id shouldn't be needed, but setting
+    // the state is supposed to be a general function
+    let first_account_id_when_converting = login_id.into();
+    set_state_with_all_accounts(stored_login, first_account_id_when_converting, state).await
+}
+
+#[tauri::command]
+pub async fn rename_account_for_password(
+    password: UserPassword,
+    account_id: &str,
+    new_account_id: &str,
+    state: tauri::State<'_, WalletState>,
+) -> Result<(), BackendError> {
+    log::info!("Renaming account: {account_id} to {new_account_id}");
+    // Currently we only support a single, default, id in the wallet
+    let login_id = wallet_storage::LoginId::new(DEFAULT_LOGIN_ID.to_string());
+    let account_id = wallet_storage::AccountId::new(account_id.to_string());
+    let new_account_id = wallet_storage::AccountId::new(new_account_id.to_string());
+    wallet_storage::rename_account_in_login(&login_id, &account_id, &new_account_id, &password)?;
+
+    // Load from storage to reset the internal tuari state
     let stored_login = wallet_storage::load_existing_login(&login_id, &password)?;
     // NOTE: Since we removed from a multi-account login, this id shouldn't be needed, but setting
     // the state is supposed to be a general function
@@ -621,10 +640,7 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
 
-    use crate::wallet_storage::{
-        self,
-        account_data::{MnemonicAccount, WalletAccount},
-    };
+    use crate::wallet_storage::account_data::{MnemonicAccount, WalletAccount};
 
     use super::*;
 

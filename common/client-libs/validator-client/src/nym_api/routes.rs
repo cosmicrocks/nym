@@ -6,6 +6,7 @@ use nym_network_defaults::NYM_API_VERSION;
 pub const API_VERSION: &str = NYM_API_VERSION;
 pub const MIXNODES: &str = "mixnodes";
 pub const GATEWAYS: &str = "gateways";
+pub const DESCRIBED: &str = "described";
 
 pub const DETAILED: &str = "detailed";
 pub const DETAILED_UNFILTERED: &str = "detailed-unfiltered";
@@ -14,8 +15,13 @@ pub const REWARDED: &str = "rewarded";
 pub const COCONUT_ROUTES: &str = "coconut";
 pub const BANDWIDTH: &str = "bandwidth";
 
+pub const COCONUT_FREE_PASS: &str = "free-pass";
+pub const COCONUT_FREE_PASS_NONCE: &str = "free-pass-nonce";
 pub const COCONUT_BLIND_SIGN: &str = "blind-sign";
 pub const COCONUT_VERIFY_BANDWIDTH_CREDENTIAL: &str = "verify-bandwidth-credential";
+pub const COCONUT_EPOCH_CREDENTIALS: &str = "epoch-credentials";
+pub const COCONUT_ISSUED_CREDENTIAL: &str = "issued-credential";
+pub const COCONUT_ISSUED_CREDENTIALS: &str = "issued-credentials";
 
 pub const STATUS_ROUTES: &str = "status";
 pub const MIXNODE: &str = "mixnode";

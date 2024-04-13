@@ -8,12 +8,13 @@ license = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-thiserror = "1.0.37"
+thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 nym-crypto = { path = "../../crypto", features = ["hashing", "symmetric"] }
 nym-sphinx-types = { path = "../types" }
 
 [features]
+default = ["sphinx"]
 sphinx = ["nym-crypto/sphinx", "nym-sphinx-types/outfox"]
 outfox = ["nym-crypto/outfox", "nym-sphinx-types/outfox"]

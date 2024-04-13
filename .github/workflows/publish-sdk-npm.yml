@@ -1,0 +1,50 @@
+name: publish-sdk-npm
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-20.04-16-core
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup yarn
+        run: npm install -g yarn
+
+      - name: Install Rust stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install wasm-opt
+        run: cargo install wasm-opt
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.20"
+
+      - name: Install TinyGo
+        uses: acifani/setup-tinygo@v1
+        with:
+          tinygo-version: "0.27.0"
+
+      - name: Install dependencies
+        run: yarn
+
+      - name: Build WASM and Typescript SDK
+        run: yarn sdk:build
+
+      - name: Publish to NPM
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: ./sdk/typescript/scripts/publish.sh

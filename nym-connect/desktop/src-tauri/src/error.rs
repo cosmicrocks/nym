@@ -45,6 +45,21 @@ pub enum BackendError {
         #[from]
         source: crate::operations::growth::api_client::ApiClientError,
     },
+    #[error("{source}")]
+    EnvError {
+        #[from]
+        source: std::env::VarError,
+    },
+    #[error("{source}")]
+    UrlError {
+        #[from]
+        source: url::ParseError,
+    },
+    #[error("{source}")]
+    APIError {
+        #[from]
+        source: nym_validator_client::nym_api::error::NymAPIError,
+    },
 
     #[error("could not send disconnect signal to the SOCKS5 client")]
     CoundNotSendDisconnectSignal,
@@ -66,6 +81,26 @@ pub enum BackendError {
     CouldNotGetConfigFilename,
     #[error("could not load existing gateway configuration")]
     CouldNotLoadExistingGatewayConfiguration(std::io::Error),
+    #[error("could not upgrade `{file}` to latest version")]
+    CouldNotUpgradeExistingConfigurationFile { file: std::path::PathBuf },
+    #[error("could not upgrade `{file}` to latest version (failed at {failed_at_version})")]
+    CouldNotUpgradeExistingConfigurationFileAtVersion {
+        file: std::path::PathBuf,
+        failed_at_version: String,
+    },
+
+    #[error("no gateways found in directory")]
+    NoGatewaysFoundInDirectory,
+    #[error("no gateways found with compatible version: {0}")]
+    NoVersionCompatibleGatewaysFound(String),
+    #[error("no gateways found with acceptable performance")]
+    NoGatewaysWithAcceptablePerformanceFound,
+
+    #[error("no network-requesters found in directory")]
+    NoServicesFoundInDirectory,
+    #[error("no active network-requesters found in directory")]
+    NoActiveServicesFound,
+
     #[error("unable to open a new window")]
     NewWindowError,
     #[error("unable to parse the specified gateway")]
@@ -77,6 +112,9 @@ pub enum BackendError {
     UnableToLoadKeys {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    #[error(transparent)]
+    ConfigUpgradeFailure(#[from] nym_client_core::config::ConfigUpgradeFailure),
 
     #[error("HTTP get request failed: {status_code}")]
     RequestFail {

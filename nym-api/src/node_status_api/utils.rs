@@ -1,12 +1,12 @@
 // Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::node_status_api::models::Uptime;
 use crate::node_status_api::{FIFTEEN_MINUTES, ONE_HOUR};
 use crate::storage::models::NodeStatus;
 use log::warn;
 use nym_mixnet_contract_common::MixId;
-use std::convert::TryInto;
+
 use time::OffsetDateTime;
 
 // A temporary helper structs used to produce reports for active nodes.

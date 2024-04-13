@@ -1,37 +1,44 @@
 // Copyright 2020-2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 #[macro_use]
 extern crate rocket;
 
+use crate::coconut::dkg::controller::keys::{
+    can_validate_coconut_keys, load_bte_keypair, load_coconut_keypair_if_exists,
+};
 use crate::epoch_operations::RewardedSetUpdater;
+use crate::network::models::NetworkDetails;
+use crate::node_describe_cache::DescribedNodes;
 use crate::node_status_api::uptime_updater::HistoricalUptimeUpdater;
+use crate::support::caching::cache::SharedCache;
 use crate::support::cli;
-use crate::support::cli::CliArgs;
 use crate::support::config::Config;
 use crate::support::storage;
 use crate::support::storage::NymApiStorage;
 use ::nym_config::defaults::setup_env;
-use anyhow::Result;
 use circulating_supply_api::cache::CirculatingSupplyCache;
 use clap::Parser;
 use coconut::dkg::controller::DkgController;
-use log::info;
 use node_status_api::NodeStatusCache;
 use nym_bin_common::logging::setup_logging;
+use nym_config::defaults::NymNetworkDetails;
 use nym_contract_cache::cache::NymContractCache;
 use nym_sphinx::receiver::SphinxMessageReceiver;
 use nym_task::TaskManager;
 use rand::rngs::OsRng;
-use std::error::Error;
 use support::{http, nyxd};
 
 mod circulating_supply_api;
 mod coconut;
 mod epoch_operations;
+pub(crate) mod network;
 mod network_monitor;
+pub(crate) mod node_describe_cache;
 pub(crate) mod node_status_api;
 pub(crate) mod nym_contract_cache;
+pub(crate) mod nym_nodes;
+mod status;
 pub(crate) mod support;
 
 struct ShutdownHandles {
@@ -40,7 +47,7 @@ struct ShutdownHandles {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn main() -> Result<(), anyhow::Error> {
     println!("Starting nym api...");
 
     cfg_if::cfg_if! {if #[cfg(feature = "console-subscriber")] {
@@ -49,25 +56,41 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }}
 
     setup_logging();
-    let args = cli::CliArgs::parse();
+    let args = cli::Cli::parse();
+    trace!("{:#?}", args);
+
     setup_env(args.config_env_file.as_ref());
-    run_nym_api(args).await
+    args.execute().await
 }
 
-async fn start_nym_api_tasks(
-    config: Config,
-) -> Result<ShutdownHandles, Box<dyn Error + Send + Sync>> {
+async fn start_nym_api_tasks(config: Config) -> anyhow::Result<ShutdownHandles> {
     let nyxd_client = nyxd::Client::new(&config);
-    let mix_denom = nyxd_client.chain_details().await.mix_denom.base;
+    let connected_nyxd = config.get_nyxd_url();
+    let nym_network_details = NymNetworkDetails::new_from_env();
+    let network_details = NetworkDetails::new(connected_nyxd.to_string(), nym_network_details);
 
-    let coconut_keypair = coconut::keypair::KeyPair::new();
+    let coconut_keypair_wrapper = coconut::keys::KeyPair::new();
+
+    // if the keypair doesnt exist (because say this API is running in the caching mode), nothing will happen
+    if let Some(loaded_keys) = load_coconut_keypair_if_exists(&config.coconut_signer)? {
+        let issued_for = loaded_keys.issued_for_epoch;
+        coconut_keypair_wrapper.set(loaded_keys).await;
+
+        if can_validate_coconut_keys(&nyxd_client, issued_for).await? {
+            coconut_keypair_wrapper.validate()
+        }
+    }
+
+    let identity_keypair = config.base.storage_paths.load_identity()?;
+    let identity_public_key = *identity_keypair.public_key();
 
     // let's build our rocket!
     let rocket = http::setup_rocket(
         &config,
-        mix_denom,
+        network_details,
         nyxd_client.clone(),
-        coconut_keypair.clone(),
+        identity_keypair,
+        coconut_keypair_wrapper.clone(),
     )
     .await?;
 
@@ -84,6 +107,19 @@ async fn start_nym_api_tasks(
     let node_status_cache_state = rocket.state::<NodeStatusCache>().unwrap();
     let circulating_supply_cache_state = rocket.state::<CirculatingSupplyCache>().unwrap();
     let maybe_storage = rocket.state::<NymApiStorage>();
+    let described_nodes_state = rocket.state::<SharedCache<DescribedNodes>>().unwrap();
+
+    // start note describe cache refresher
+    // we should be doing the below, but can't due to our current startup structure
+    // let refresher = node_describe_cache::new_refresher(&config.topology_cacher);
+    // let cache = refresher.get_shared_cache();
+    node_describe_cache::new_refresher_with_initial_value(
+        &config.topology_cacher,
+        nym_contract_cache_state.clone(),
+        described_nodes_state.to_owned(),
+    )
+    .named("node-self-described-data-refresher")
+    .start(shutdown.subscribe_named("node-self-described-data-refresher"));
 
     // start all the caches first
     let nym_contract_cache_listener = nym_contract_cache::start_refresher(
@@ -92,6 +128,7 @@ async fn start_nym_api_tasks(
         nyxd_client.clone(),
         &shutdown,
     );
+
     node_status_api::start_cache_refresh(
         &config.node_status_api,
         nym_contract_cache_state,
@@ -109,14 +146,17 @@ async fn start_nym_api_tasks(
 
     // start dkg task
     if config.coconut_signer.enabled {
+        let dkg_bte_keypair = load_bte_keypair(&config.coconut_signer)?;
+
         DkgController::start(
             &config.coconut_signer,
             nyxd_client.clone(),
-            coconut_keypair,
+            coconut_keypair_wrapper,
+            dkg_bte_keypair,
+            identity_public_key,
             OsRng,
             &shutdown,
-        )
-        .await?;
+        )?;
     }
 
     // and then only start the uptime updater (and the monitor itself, duh)
@@ -150,27 +190,4 @@ async fn start_nym_api_tasks(
         task_manager_handle: shutdown,
         rocket_handle: rocket_shutdown_handle,
     })
-}
-
-async fn run_nym_api(cli_args: CliArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let save_to_file = cli_args.save_config;
-    let config = cli::build_config(cli_args)?;
-
-    // if we just wanted to write data to the config, exit, don't start any tasks
-    if save_to_file {
-        info!("Saving the configuration to a file");
-        config.save_to_default_location()?;
-        return Ok(());
-    }
-
-    let shutdown_handlers = start_nym_api_tasks(config).await?;
-
-    let res = shutdown_handlers
-        .task_manager_handle
-        .catch_interrupt()
-        .await;
-    log::info!("Stopping nym API");
-    shutdown_handlers.rocket_handle.notify();
-
-    res
 }

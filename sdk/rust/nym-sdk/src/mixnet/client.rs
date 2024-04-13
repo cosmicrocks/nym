@@ -5,41 +5,52 @@ use super::{connection_state::BuilderState, Config, StoragePaths};
 use crate::bandwidth::BandwidthAcquireClient;
 use crate::mixnet::socks5_client::Socks5MixnetClient;
 use crate::mixnet::{CredentialStorage, MixnetClient, Recipient};
+use crate::GatewayTransceiver;
+use crate::NymNetworkDetails;
 use crate::{Error, Result};
 use futures::channel::mpsc;
 use futures::StreamExt;
-use nym_client_core::client::base_client::storage::gateway_details::GatewayDetailsStore;
+use log::warn;
+use nym_client_core::client::base_client::storage::helpers::get_all_registered_identities;
 use nym_client_core::client::base_client::storage::{
-    Ephemeral, MixnetClientStorage, OnDiskPersistent,
+    Ephemeral, GatewaysDetailsStore, MixnetClientStorage, OnDiskPersistent,
 };
 use nym_client_core::client::base_client::BaseClient;
 use nym_client_core::client::key_manager::persistence::KeyStore;
-use nym_client_core::config::DebugConfig;
-use nym_client_core::init::GatewaySetup;
-use nym_client_core::{
-    client::{base_client::BaseClientBuilder, replies::reply_storage::ReplyStorageBackend},
-    config::GatewayEndpointConfig,
+use nym_client_core::client::{
+    base_client::BaseClientBuilder, replies::reply_storage::ReplyStorageBackend,
 };
-use nym_network_defaults::NymNetworkDetails;
+use nym_client_core::config::DebugConfig;
+use nym_client_core::error::ClientCoreError;
+use nym_client_core::init::helpers::current_gateways;
+use nym_client_core::init::types::{GatewaySelectionSpecification, GatewaySetup};
+use nym_network_defaults::WG_TUN_DEVICE_IP_ADDRESS;
 use nym_socks5_client_core::config::Socks5;
 use nym_task::manager::TaskStatus;
+use nym_task::{TaskClient, TaskHandle};
 use nym_topology::provider_trait::TopologyProvider;
-use nym_validator_client::nyxd::QueryNyxdClient;
-use nym_validator_client::Client;
+use nym_validator_client::{nyxd, QueryHttpRpcNyxdClient};
+use rand::rngs::OsRng;
+use std::net::IpAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use url::Url;
 
 // The number of surbs to include in a message by default
-const DEFAULT_NUMBER_OF_SURBS: u32 = 5;
+const DEFAULT_NUMBER_OF_SURBS: u32 = 10;
 
 #[derive(Default)]
 pub struct MixnetClientBuilder<S: MixnetClientStorage = Ephemeral> {
     config: Config,
     storage_paths: Option<StoragePaths>,
-    gateway_config: Option<GatewayEndpointConfig>,
     socks5_config: Option<Socks5>,
+
+    wireguard_mode: bool,
+    wait_for_gateway: bool,
     custom_topology_provider: Option<Box<dyn TopologyProvider + Send + Sync>>,
+    custom_gateway_transceiver: Option<Box<dyn GatewayTransceiver + Send + Sync>>,
+    custom_shutdown: Option<TaskClient>,
+    force_tls: bool,
 
     // TODO: incorporate it properly into `MixnetClientStorage` (I will need it in wasm anyway)
     gateway_endpoint_config_path: Option<PathBuf>,
@@ -68,13 +79,17 @@ impl MixnetClientBuilder<OnDiskPersistent> {
         Ok(MixnetClientBuilder {
             config: Default::default(),
             storage_paths: None,
-            gateway_config: None,
             socks5_config: None,
+            wireguard_mode: false,
+            wait_for_gateway: false,
             custom_topology_provider: None,
             storage: storage_paths
                 .initialise_default_persistent_storage()
                 .await?,
             gateway_endpoint_config_path: None,
+            custom_shutdown: None,
+            custom_gateway_transceiver: None,
+            force_tls: false,
         })
     }
 }
@@ -83,10 +98,11 @@ impl<S> MixnetClientBuilder<S>
 where
     S: MixnetClientStorage + 'static,
     S::ReplyStore: Send + Sync,
+    S::GatewaysDetailsStore: Sync,
     <S::ReplyStore as ReplyStorageBackend>::StorageError: Sync + Send,
     <S::CredentialStore as CredentialStorage>::StorageError: Send + Sync,
     <S::KeyStore as KeyStore>::StorageError: Send + Sync,
-    <S::GatewayDetailsStore as GatewayDetailsStore>::StorageError: Send + Sync,
+    <S::GatewaysDetailsStore as GatewaysDetailsStore>::StorageError: Send + Sync,
 {
     /// Creates a client builder with the provided client storage implementation.
     #[must_use]
@@ -94,9 +110,13 @@ where
         MixnetClientBuilder {
             config: Default::default(),
             storage_paths: None,
-            gateway_config: None,
             socks5_config: None,
+            wireguard_mode: false,
+            wait_for_gateway: false,
             custom_topology_provider: None,
+            custom_gateway_transceiver: None,
+            custom_shutdown: None,
+            force_tls: false,
             gateway_endpoint_config_path: None,
             storage,
         }
@@ -108,9 +128,13 @@ where
         MixnetClientBuilder {
             config: self.config,
             storage_paths: self.storage_paths,
-            gateway_config: self.gateway_config,
             socks5_config: self.socks5_config,
+            wireguard_mode: self.wireguard_mode,
+            wait_for_gateway: self.wait_for_gateway,
             custom_topology_provider: self.custom_topology_provider,
+            custom_gateway_transceiver: self.custom_gateway_transceiver,
+            custom_shutdown: self.custom_shutdown,
+            force_tls: self.force_tls,
             gateway_endpoint_config_path: self.gateway_endpoint_config_path,
             storage,
         }
@@ -139,10 +163,24 @@ where
         self
     }
 
+    /// Attempt to only choose a gateway that supports wss protocol.
+    #[must_use]
+    pub fn force_tls(mut self, must_use_tls: bool) -> Self {
+        self.force_tls = must_use_tls;
+        self
+    }
+
     /// Enable paid coconut bandwidth credentials mode.
     #[must_use]
     pub fn enable_credentials_mode(mut self) -> Self {
         self.config.enabled_credentials_mode = true;
+        self
+    }
+
+    /// Enable paid coconut bandwidth credentials mode.
+    #[must_use]
+    pub fn credentials_mode(mut self, credentials_mode: bool) -> Self {
+        self.config.enabled_credentials_mode = credentials_mode;
         self
     }
 
@@ -170,6 +208,38 @@ where
         self
     }
 
+    /// Use an externally managed shutdown mechanism.
+    #[must_use]
+    pub fn custom_shutdown(mut self, shutdown: TaskClient) -> Self {
+        self.custom_shutdown = Some(shutdown);
+        self
+    }
+
+    /// Attempt to wait for the selected gateway (if applicable) to come online if its currently not bonded.
+    #[must_use]
+    pub fn with_wireguard_mode(mut self, wireguard_mode: bool) -> Self {
+        self.wireguard_mode = wireguard_mode;
+        self
+    }
+
+    /// Attempt to wait for the selected gateway (if applicable) to come online if its currently not bonded.
+    #[must_use]
+    pub fn with_wait_for_gateway(mut self, wait_for_gateway: bool) -> Self {
+        self.wait_for_gateway = wait_for_gateway;
+        self
+    }
+
+    /// Use custom mixnet sender that might not be the default websocket gateway connection.
+    /// only for advanced use
+    #[must_use]
+    pub fn custom_gateway_transceiver(
+        mut self,
+        gateway_transceiver: Box<dyn GatewayTransceiver + Send + Sync>,
+    ) -> Self {
+        self.custom_gateway_transceiver = Some(gateway_transceiver);
+        self
+    }
+
     /// Use specified file for storing gateway configuration.
     pub fn gateway_endpoint_config_path<P: AsRef<Path>>(mut self, path: P) -> Self {
         self.gateway_endpoint_config_path = Some(path.as_ref().to_owned());
@@ -177,14 +247,14 @@ where
     }
 
     /// Construct a [`DisconnectedMixnetClient`] from the setup specified.
-    pub async fn build(self) -> Result<DisconnectedMixnetClient<S>> {
-        let client = DisconnectedMixnetClient::new(
-            self.config,
-            self.socks5_config,
-            self.storage,
-            self.custom_topology_provider,
-        )
-        .await?;
+    pub fn build(self) -> Result<DisconnectedMixnetClient<S>> {
+        let client = DisconnectedMixnetClient::new(self.config, self.socks5_config, self.storage)?
+            .custom_gateway_transceiver(self.custom_gateway_transceiver)
+            .custom_topology_provider(self.custom_topology_provider)
+            .custom_shutdown(self.custom_shutdown)
+            .wireguard_mode(self.wireguard_mode)
+            .wait_for_gateway(self.wait_for_gateway)
+            .force_tls(self.force_tls);
 
         Ok(client)
     }
@@ -214,20 +284,36 @@ where
 
     /// In the case of enabled credentials, a client instance responsible for querying the state of the
     /// dkg and coconut contracts
-    dkg_query_client: Option<Client<QueryNyxdClient>>,
+    dkg_query_client: Option<QueryHttpRpcNyxdClient>,
 
     /// Alternative provider of network topology used for constructing sphinx packets.
     custom_topology_provider: Option<Box<dyn TopologyProvider + Send + Sync>>,
+
+    /// advanced usage of custom gateways
+    custom_gateway_transceiver: Option<Box<dyn GatewayTransceiver + Send + Sync>>,
+
+    /// If the client connects via Wireguard tunnel to the gateway.
+    wireguard_mode: bool,
+
+    /// Attempt to wait for the selected gateway (if applicable) to come online if its currently not bonded.
+    wait_for_gateway: bool,
+
+    /// Force the client to connect using wss protocol with the gateway.
+    force_tls: bool,
+
+    /// Allows passing an externally controlled shutdown handle.
+    custom_shutdown: Option<TaskClient>,
 }
 
 impl<S> DisconnectedMixnetClient<S>
 where
     S: MixnetClientStorage + 'static,
     S::ReplyStore: Send + Sync,
+    S::GatewaysDetailsStore: Sync,
     <S::ReplyStore as ReplyStorageBackend>::StorageError: Sync + Send,
     <S::CredentialStore as CredentialStorage>::StorageError: Send + Sync,
     <S::KeyStore as KeyStore>::StorageError: Send + Sync,
-    <S::GatewayDetailsStore as GatewayDetailsStore>::StorageError: Send + Sync,
+    <S::GatewaysDetailsStore as GatewaysDetailsStore>::StorageError: Send + Sync,
 {
     /// Create a new mixnet client in a disconnected state. The default configuration,
     /// creates a new mainnet client with ephemeral keys stored in RAM, which will be discarded at
@@ -236,18 +322,19 @@ where
     /// Callers have the option of supplying further parameters to:
     /// - store persistent identities at a location on-disk, if desired;
     /// - use SOCKS5 mode
-    async fn new(
+    fn new(
         config: Config,
         socks5_config: Option<Socks5>,
         storage: S,
-        custom_topology_provider: Option<Box<dyn TopologyProvider + Send + Sync>>,
     ) -> Result<DisconnectedMixnetClient<S>> {
         // don't create dkg client for the bandwidth controller if credentials are disabled
         let dkg_query_client = if config.enabled_credentials_mode {
-            let client_config = nym_validator_client::Config::try_from_nym_network_details(
-                &config.network_details,
+            let client_config =
+                nyxd::Config::try_from_nym_network_details(&config.network_details)?;
+            let client = QueryHttpRpcNyxdClient::connect(
+                client_config,
+                config.network_details.endpoints[0].nyxd_url.as_str(),
             )?;
-            let client = nym_validator_client::Client::new_query(client_config)?;
             Some(client)
         } else {
             None
@@ -259,8 +346,55 @@ where
             state: BuilderState::New,
             dkg_query_client,
             storage,
-            custom_topology_provider,
+            custom_topology_provider: None,
+            custom_gateway_transceiver: None,
+            wireguard_mode: false,
+            wait_for_gateway: false,
+            force_tls: false,
+            custom_shutdown: None,
         })
+    }
+
+    #[must_use]
+    pub fn custom_shutdown(mut self, shutdown: Option<TaskClient>) -> Self {
+        self.custom_shutdown = shutdown;
+        self
+    }
+
+    #[must_use]
+    pub fn custom_topology_provider(
+        mut self,
+        provider: Option<Box<dyn TopologyProvider + Send + Sync>>,
+    ) -> Self {
+        self.custom_topology_provider = provider;
+        self
+    }
+
+    #[must_use]
+    pub fn custom_gateway_transceiver(
+        mut self,
+        gateway_transceiver: Option<Box<dyn GatewayTransceiver + Send + Sync>>,
+    ) -> Self {
+        self.custom_gateway_transceiver = gateway_transceiver;
+        self
+    }
+
+    #[must_use]
+    pub fn wireguard_mode(mut self, wireguard_mode: bool) -> Self {
+        self.wireguard_mode = wireguard_mode;
+        self
+    }
+
+    #[must_use]
+    pub fn wait_for_gateway(mut self, wait_for_gateway: bool) -> Self {
+        self.wait_for_gateway = wait_for_gateway;
+        self
+    }
+
+    #[must_use]
+    pub fn force_tls(mut self, must_use_tls: bool) -> Self {
+        self.force_tls = must_use_tls;
+        self
     }
 
     fn get_api_endpoints(&self) -> Vec<Url> {
@@ -283,20 +417,65 @@ where
             .collect()
     }
 
-    /// Client keys are generated at client creation if none were found. The gateway shared
-    /// key, however, is created during the gateway registration handshake so it might not
-    /// necessarily be available.
-    /// Furthermore, it has to be coupled with particular gateway's config.
-    async fn has_gateway_info(&self) -> bool {
-        let has_keys = self.storage.key_store().load_keys().await.is_ok();
-        let has_gateway_details = self
-            .storage
-            .gateway_details_store()
-            .load_gateway_details()
-            .await
-            .is_ok();
+    fn wireguard_tun_address(&self) -> Option<IpAddr> {
+        // currently use a hardcoded value here, but perhaps we should change that later
+        if self.wireguard_mode {
+            Some(WG_TUN_DEVICE_IP_ADDRESS)
+        } else {
+            None
+        }
+    }
 
-        has_keys && has_gateway_details
+    async fn new_gateway_setup(&self) -> Result<GatewaySetup, ClientCoreError> {
+        let nym_api_endpoints = self.get_api_endpoints();
+
+        let selection_spec = GatewaySelectionSpecification::new(
+            self.config.user_chosen_gateway.clone(),
+            None,
+            self.force_tls,
+        );
+
+        let mut rng = OsRng;
+        let available_gateways = current_gateways(&mut rng, &nym_api_endpoints).await?;
+
+        Ok(GatewaySetup::New {
+            specification: selection_spec,
+            available_gateways,
+            wg_tun_address: self.wireguard_tun_address(),
+        })
+    }
+
+    /// Check if the client already has an active gateway enabled.
+    async fn has_active_gateway(&self) -> bool {
+        let storage = self.storage.gateway_details_store();
+
+        match storage.active_gateway().await {
+            Err(err) => {
+                warn!("failed to query for the current active gateway: {err}");
+                return false;
+            }
+            Ok(active) => {
+                if active.registration.is_some() {
+                    return true;
+                }
+            }
+        }
+
+        match get_all_registered_identities(storage).await {
+            Err(err) => {
+                warn!("failed to query for all registered gateways: {err}")
+            }
+            Ok(all_ids) => {
+                if !all_ids.is_empty() {
+                    warn!("this client doesn't have an active gateway set, however, it's already registered with the following gateways (consider making one of them active):");
+                    for id in all_ids {
+                        warn!("{id}")
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Register with a gateway. If a gateway is provided in the config then that will try to be
@@ -313,21 +492,17 @@ where
 
         log::debug!("Registering with gateway");
 
-        let api_endpoints = self.get_api_endpoints();
-
-        let gateway_setup = if self.has_gateway_info().await {
-            GatewaySetup::MustLoad
+        let gateway_setup = if self.has_active_gateway().await {
+            GatewaySetup::MustLoad { gateway_id: None }
         } else {
-            GatewaySetup::new_fresh(self.config.user_chosen_gateway.clone(), None)
+            self.new_gateway_setup().await?
         };
 
         // this will perform necessary key and details load and optional store
         let _init_result = nym_client_core::init::setup_gateway(
-            &gateway_setup,
+            gateway_setup,
             self.storage.key_store(),
             self.storage.gateway_details_store(),
-            !self.config.key_mode.is_keep(),
-            Some(&api_endpoints),
         )
         .await?;
 
@@ -366,22 +541,83 @@ where
         // a temporary workaround
         let base_config = self
             .config
-            .as_base_client_config(nyxd_endpoints, nym_api_endpoints);
+            .as_base_client_config(nyxd_endpoints, nym_api_endpoints.clone());
 
-        let known_gateway = self.has_gateway_info().await;
+        let known_gateway = self.has_active_gateway().await;
+
+        // if we have a known gateway, don't bother doing all of those queries
+        let gateway_setup = if known_gateway {
+            None
+        } else {
+            Some(self.new_gateway_setup().await?)
+        };
 
         let mut base_builder: BaseClientBuilder<_, _> =
-            BaseClientBuilder::new(&base_config, self.storage, self.dkg_query_client);
+            BaseClientBuilder::new(&base_config, self.storage, self.dkg_query_client)
+                .with_wait_for_gateway(self.wait_for_gateway)
+                .with_wireguard_connection(self.wireguard_mode);
 
         if !known_gateway {
-            base_builder = base_builder.with_gateway_setup(GatewaySetup::new_fresh(
-                self.config.user_chosen_gateway,
-                None,
-            ))
+            // safety: `gateway_setup` is always set whenever `known_gateway` is false
+            base_builder = base_builder.with_gateway_setup(gateway_setup.unwrap());
         }
+
+        // let mut base_builder: BaseClientBuilder<_, _> = if !known_gateway {
+        //     // we need to setup a new gateway
+        //     let setup = self.new_gateway_setup().await;
+        //
+        //     BaseClientBuilder::new(&base_config, self.storage, self.dkg_query_client)
+        //         .with_wait_for_gateway(self.wait_for_gateway)
+        //         .with_gateway_setup(setup)
+        // // } else if self.wireguard_mode {
+        // //     // load current active gateway in wireguard mode
+        // //     details_store.set_wireguard_mode(true).await?;
+        // //
+        // //     if let Ok(PersistedGatewayDetails::Default(mut config)) = self
+        // //         .storage
+        // //         .gateway_details_store()
+        // //         .load_gateway_details()
+        // //         .await
+        // //     {
+        // //         config.details.gateway_listener = format!(
+        // //             "ws://{}:{}",
+        // //             WG_TUN_DEVICE_ADDRESS, DEFAULT_CLIENT_LISTENING_PORT
+        // //         );
+        // //         if let Err(e) = self
+        // //             .storage
+        // //             .gateway_details_store()
+        // //             .store_gateway_details(&PersistedGatewayDetails::Default(config))
+        // //             .await
+        // //         {
+        // //             warn!("Could not switch to using wireguard mode - {:?}", e);
+        // //         }
+        // //     } else {
+        // //         warn!("Storage type not supported with wireguard mode");
+        // //     }
+        // //     BaseClientBuilder::new(&base_config, self.storage, self.dkg_query_client)
+        // //         .with_wait_for_gateway(self.wait_for_gateway)
+        // } else {
+        //     // load current active gateway in non-wireguard mode
+        //
+        //     // make sure our current storage mode matches the desired wg mode
+        //     details_store
+        //         .set_wireguard_mode(self.wireguard_mode)
+        //         .await?;
+        //
+        //     BaseClientBuilder::new(&base_config, self.storage, self.dkg_query_client)
+        //         .with_wait_for_gateway(self.wait_for_gateway)
+        // };
 
         if let Some(topology_provider) = self.custom_topology_provider {
             base_builder = base_builder.with_topology_provider(topology_provider);
+        }
+
+        if let Some(custom_shutdown) = self.custom_shutdown {
+            base_builder = base_builder.with_shutdown(custom_shutdown)
+        }
+
+        if let Some(gateway_transceiver) = self.custom_gateway_transceiver {
+            base_builder = base_builder.with_gateway_transceiver(gateway_transceiver);
         }
 
         let started_client = base_builder.start_base().await?;
@@ -411,7 +647,6 @@ where
     ///     let client = mixnet::MixnetClientBuilder::new_ephemeral()
     ///         .socks5_config(socks5_config)
     ///         .build()
-    ///         .await
     ///         .unwrap();
     ///     let client = client.connect_to_mixnet_via_socks5().await.unwrap();
     /// }
@@ -437,29 +672,39 @@ where
             client_output,
             client_state.clone(),
             nym_address,
-            started_client.task_manager.subscribe(),
+            started_client.task_handle.get_handle(),
             packet_type,
         );
-        started_client
-            .task_manager
-            .start_status_listener(socks5_status_tx)
-            .await;
-        match socks5_status_rx
-            .next()
-            .await
-            .ok_or(Error::Socks5NotStarted)?
-            .downcast_ref::<TaskStatus>()
-            .ok_or(Error::Socks5NotStarted)?
-        {
-            TaskStatus::Ready => {
-                log::debug!("Socks5 connected");
+
+        // TODO: more graceful handling here, surely both variants should work... I think?
+        if let TaskHandle::Internal(task_manager) = &mut started_client.task_handle {
+            task_manager
+                .start_status_listener(socks5_status_tx, TaskStatus::Ready)
+                .await;
+            match socks5_status_rx
+                .next()
+                .await
+                .ok_or(Error::Socks5NotStarted)?
+                .downcast_ref::<TaskStatus>()
+                .ok_or(Error::Socks5NotStarted)?
+            {
+                TaskStatus::Ready => {
+                    log::debug!("Socks5 connected");
+                }
+                TaskStatus::ReadyWithGateway(gateway) => {
+                    log::debug!("Socks5 connected to {gateway}");
+                }
             }
+        } else {
+            return Err(Error::new_unsupported(
+                "connecting with socks5 is currently unsupported with custom shutdown",
+            ));
         }
 
         Ok(Socks5MixnetClient {
             nym_address,
             client_state,
-            task_manager: started_client.task_manager,
+            task_handle: started_client.task_handle,
             socks5_config,
         })
     }
@@ -480,7 +725,6 @@ where
     /// async fn main() {
     ///     let client = mixnet::MixnetClientBuilder::new_ephemeral()
     ///         .build()
-    ///         .await
     ///         .unwrap();
     ///     let client = client.connect_to_mixnet().await.unwrap();
     /// }
@@ -496,15 +740,15 @@ where
 
         let reconstructed_receiver = client_output.register_receiver()?;
 
-        Ok(MixnetClient {
+        Ok(MixnetClient::new(
             nym_address,
             client_input,
             client_output,
             client_state,
             reconstructed_receiver,
-            task_manager: started_client.task_manager,
-            packet_type: None,
-        })
+            started_client.task_handle,
+            None,
+        ))
     }
 }
 

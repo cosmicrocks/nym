@@ -1,32 +1,53 @@
 // Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
-use crate::node::client_handling::websocket::connection_handler::{ClientDetails, FreshHandler};
-use crate::node::client_handling::websocket::message_receiver::MixMessageReceiver;
-use crate::node::storage::error::StorageError;
-use crate::node::storage::Storage;
-use futures::StreamExt;
+use crate::node::client_handling::bandwidth::BandwidthError;
+use crate::node::client_handling::websocket::connection_handler::ClientBandwidth;
+use crate::node::{
+    client_handling::{
+        bandwidth::Bandwidth,
+        websocket::{
+            connection_handler::{ClientDetails, FreshHandler},
+            message_receiver::{
+                IsActive, IsActiveRequestReceiver, IsActiveResultSender, MixMessageReceiver,
+            },
+        },
+        FREE_TESTNET_BANDWIDTH_VALUE,
+    },
+    storage::{error::StorageError, Storage},
+};
+use futures::{
+    future::{FusedFuture, OptionFuture},
+    FutureExt, StreamExt,
+};
 use log::*;
-use nym_gateway_requests::iv::IVConversionError;
-use nym_gateway_requests::types::{BinaryRequest, ServerResponse};
-use nym_gateway_requests::{ClientControlRequest, GatewayRequestsError};
+use nym_credentials::coconut::bandwidth::{bandwidth_credential_params, CredentialType};
+use nym_credentials_interface::{Base58, CoconutError};
+use nym_gateway_requests::models::CredentialSpendingRequest;
+use nym_gateway_requests::{
+    iv::{IVConversionError, IV},
+    types::{BinaryRequest, ServerResponse},
+    ClientControlRequest, GatewayRequestsError,
+};
 use nym_sphinx::forwarding::packet::MixPacket;
-use rand::{CryptoRng, Rng};
-use std::convert::TryFrom;
-use std::process;
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::tungstenite::protocol::Message;
-
-use crate::node::client_handling::bandwidth::Bandwidth;
-use crate::node::client_handling::FREE_TESTNET_BANDWIDTH_VALUE;
-use nym_gateway_requests::iv::IV;
 use nym_task::TaskClient;
+use nym_validator_client::coconut::CoconutApiError;
+use rand::{CryptoRng, Rng};
+use std::{process, time::Duration};
+use thiserror::Error;
+use time::OffsetDateTime;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite::{protocol::Message, Error as WsError};
 
 #[derive(Debug, Error)]
-pub(crate) enum RequestHandlingError {
+pub enum RequestHandlingError {
     #[error("Internal gateway storage error")]
     StorageError(#[from] StorageError),
+
+    #[error(
+        "the database entry for bandwidth of the registered client {client_address} is missing!"
+    )]
+    MissingClientBandwidthEntry { client_address: String },
 
     #[error("Provided bandwidth IV is malformed - {0}")]
     MalformedIV(#[from] IVConversionError),
@@ -37,14 +58,14 @@ pub(crate) enum RequestHandlingError {
     #[error("Provided binary request was malformed - {0}")]
     InvalidTextRequest(<ClientControlRequest as TryFrom<String>>::Error),
 
-    #[error("The received request is not valid in the current context")]
-    IllegalRequest,
-
-    #[error("Provided bandwidth credential asks for more bandwidth than it is supported to add at once (credential value: {0}, supported: {}). Try to split it before attempting again", i64::MAX)]
-    UnsupportedBandwidthValue(u64),
+    #[error("The received request is not valid in the current context: {additional_context}")]
+    IllegalRequest { additional_context: String },
 
     #[error("Provided bandwidth credential did not verify correctly on {0}")]
     InvalidBandwidthCredential(String),
+
+    #[error("the provided bandwidth credential has already been spent before at this gateway")]
+    BandwidthCredentialAlreadySpent,
 
     #[error("This gateway is only accepting coconut credentials for bandwidth")]
     OnlyCoconutCredentials,
@@ -61,11 +82,35 @@ pub(crate) enum RequestHandlingError {
     #[error("There was a problem with the proposal id: {reason}")]
     ProposalIdError { reason: String },
 
-    #[error("Coconut interface error - {0}")]
-    CoconutInterfaceError(#[from] nym_coconut_interface::error::CoconutInterfaceError),
+    #[error("coconut failure: {0}")]
+    CoconutError(#[from] CoconutError),
+
+    #[error("coconut api query failure: {0}")]
+    CoconutApiError(#[from] CoconutApiError),
 
     #[error("Credential error - {0}")]
     CredentialError(#[from] nym_credentials::error::Error),
+
+    #[error("failed to recover bandwidth value: {0}")]
+    BandwidthRecoveryFailure(#[from] BandwidthError),
+
+    #[error("the provided credential did not contain a valid type attribute")]
+    InvalidTypeAttribute,
+
+    #[error("insufficient bandwidth available to process the request. required: {required}B, available: {available}B")]
+    OutOfBandwidth { required: i64, available: i64 },
+
+    #[error("the provided credential did not have a bandwidth attribute")]
+    MissingBandwidthAttribute,
+
+    #[error("attempted to claim a bandwidth voucher for an account using a free pass (it expires on {expiration})")]
+    BandwidthVoucherForFreePassAccount { expiration: OffsetDateTime },
+
+    #[error("attempted to claim another free pass for the account while another free pass is still active (it expires on {expiration})")]
+    PreexistingFreePass { expiration: OffsetDateTime },
+
+    #[error("the DKG contract is unavailable")]
+    UnavailableDkgContract,
 }
 
 impl RequestHandlingError {
@@ -92,7 +137,13 @@ impl IntoWSMessage for Result<ServerResponse, RequestHandlingError> {
 pub(crate) struct AuthenticatedHandler<R, S, St> {
     inner: FreshHandler<R, S, St>,
     client: ClientDetails,
+    client_bandwidth: ClientBandwidth,
     mix_receiver: MixMessageReceiver,
+    // Occasionally the handler is requested to ping the connected client for confirm that it's
+    // active, such as when a duplicate connection is detected. This hashmap stores the oneshot
+    // senders that are used to return the result of the ping to the handler requesting the ping.
+    is_active_request_receiver: IsActiveRequestReceiver,
+    is_active_ping_pending_reply: Option<(u64, IsActiveResultSender)>,
 }
 
 // explicitly remove handle from the global store upon being dropped
@@ -119,16 +170,32 @@ where
     /// * `fresh`: fresh, unauthenticated, connection handler.
     /// * `client`: details (i.e. address and shared keys) of the registered client
     /// * `mix_receiver`: channel used for receiving messages from the mixnet destined for this client.
-    pub(crate) fn upgrade(
+    pub(crate) async fn upgrade(
         fresh: FreshHandler<R, S, St>,
         client: ClientDetails,
         mix_receiver: MixMessageReceiver,
-    ) -> Self {
-        AuthenticatedHandler {
+        is_active_request_receiver: IsActiveRequestReceiver,
+    ) -> Result<Self, RequestHandlingError> {
+        // note: the `upgrade` function can only be called after registering or authenticating the client,
+        // meaning the appropriate database rows must have been created
+        // so in theory we could just unwrap the value here, but since we're returning a Result anyway,
+        // we might as well return a failure response instead
+        let bandwidth = fresh
+            .storage
+            .get_available_bandwidth(client.address)
+            .await?
+            .ok_or(RequestHandlingError::MissingClientBandwidthEntry {
+                client_address: client.address.as_base58_string(),
+            })?;
+
+        Ok(AuthenticatedHandler {
             inner: fresh,
             client,
+            client_bandwidth: ClientBandwidth::new(bandwidth.into()),
             mix_receiver,
-        }
+            is_active_request_receiver,
+            is_active_ping_pending_reply: None,
+        })
     }
 
     /// Explicitly removes handle from the global store.
@@ -138,15 +205,10 @@ where
             .disconnect(self.client.address)
     }
 
-    /// Checks the amount of bandwidth available for the connected client.
-    async fn get_available_bandwidth(&self) -> Result<i64, RequestHandlingError> {
-        let bandwidth = self
-            .inner
-            .storage
-            .get_available_bandwidth(self.client.address)
-            .await?
-            .unwrap_or_default();
-        Ok(bandwidth)
+    async fn expire_freepass(&mut self) -> Result<(), RequestHandlingError> {
+        self.client_bandwidth.bandwidth = Default::default();
+        self.client_bandwidth.update_flush_data();
+        Ok(self.inner.expire_freepass(self.client.address).await?)
     }
 
     /// Increases the amount of available bandwidth of the connected client by the specified value.
@@ -154,11 +216,27 @@ where
     /// # Arguments
     ///
     /// * `amount`: amount to increase the available bandwidth by.
-    async fn increase_bandwidth(&self, amount: i64) -> Result<(), RequestHandlingError> {
+    async fn increase_bandwidth(
+        &mut self,
+        bandwidth: Bandwidth,
+    ) -> Result<(), RequestHandlingError> {
+        self.client_bandwidth.bandwidth.bytes += bandwidth.value() as i64;
+
+        // any increases to bandwidth should get flushed immediately
+        // (we don't want to accidentally miss somebody claiming a gigabyte voucher)
+        self.flush_bandwidth().await
+    }
+
+    async fn set_freepass_expiration(
+        &mut self,
+        expiration: OffsetDateTime,
+    ) -> Result<(), RequestHandlingError> {
+        self.client_bandwidth.bandwidth.freepass_expiration = Some(expiration);
         self.inner
             .storage
-            .increase_bandwidth(self.client.address, amount)
+            .set_freepass_expiration(self.client.address, expiration)
             .await?;
+        self.client_bandwidth.update_flush_data();
         Ok(())
     }
 
@@ -167,11 +245,18 @@ where
     /// # Arguments
     ///
     /// * `amount`: amount to decrease the available bandwidth by.
-    async fn consume_bandwidth(&self, amount: i64) -> Result<(), RequestHandlingError> {
-        self.inner
-            .storage
-            .consume_bandwidth(self.client.address, amount)
-            .await?;
+    async fn consume_bandwidth(&mut self, amount: i64) -> Result<(), RequestHandlingError> {
+        self.client_bandwidth.bandwidth.bytes -= amount;
+
+        // since we're going to be operating on a fair use policy anyway, even if we crash and let extra few packets
+        // through, that's completely fine
+        if self
+            .client_bandwidth
+            .should_flush(self.inner.shared_state.bandwidth_cfg)
+        {
+            self.flush_bandwidth().await?;
+        }
+
         Ok(())
     }
 
@@ -187,6 +272,150 @@ where
         }
     }
 
+    async fn handle_bandwidth_request(
+        &mut self,
+        credential: CredentialSpendingRequest,
+    ) -> Result<ServerResponse, RequestHandlingError> {
+        // check if the credential hasn't been spent before
+        let serial_number = credential.data.blinded_serial_number();
+        trace!("processing credential {}", serial_number.to_bs58());
+
+        // if we already have had received a free pass (that's not expired, don't accept any additional bandwidth)
+        if self.client_bandwidth.bandwidth.freepass_expired() {
+            // the free pass we used before has expired -> reset our state and handle the request as normal
+            self.expire_freepass().await?;
+        } else if let Some(expiration) = self.client_bandwidth.bandwidth.freepass_expiration {
+            // the free pass is still valid -> return error
+            return match credential.data.typ {
+                CredentialType::Voucher => {
+                    Err(RequestHandlingError::BandwidthVoucherForFreePassAccount { expiration })
+                }
+                CredentialType::FreePass => {
+                    Err(RequestHandlingError::PreexistingFreePass { expiration })
+                }
+            };
+        }
+
+        let already_spent = self
+            .inner
+            .storage
+            .contains_credential(&serial_number)
+            .await?;
+        if already_spent {
+            trace!("the credential has already been spent before");
+            return Err(RequestHandlingError::BandwidthCredentialAlreadySpent);
+        }
+
+        trace!(
+            "attempting to obtain aggregate verification key for epoch {}",
+            credential.data.epoch_id
+        );
+
+        if !credential.data.validate_type_attribute() {
+            trace!("mismatch in the type attribute");
+            return Err(RequestHandlingError::InvalidTypeAttribute);
+        }
+
+        let Some(bandwidth_attribute) = credential.data.get_bandwidth_attribute() else {
+            trace!("missing bandwidth attribute");
+            return Err(RequestHandlingError::MissingBandwidthAttribute);
+        };
+
+        // this will extract token amounts out of bandwidth vouchers and validate expiry of free passes
+        let (raw_bandwidth, freepass_expiration) =
+            Bandwidth::parse_raw_bandwidth(bandwidth_attribute, credential.data.typ)?;
+
+        let bandwidth = Bandwidth::new(raw_bandwidth)?;
+
+        trace!("embedded bandwidth: {bandwidth:?}");
+
+        // locally verify the credential
+        {
+            let aggregated_verification_key = self
+                .inner
+                .shared_state
+                .coconut_verifier
+                .verification_key(credential.data.epoch_id)
+                .await?;
+
+            let params = bandwidth_credential_params();
+            if !credential.data.verify(params, &aggregated_verification_key) {
+                trace!("the credential did not verify correctly");
+                return Err(RequestHandlingError::InvalidBandwidthCredential(
+                    String::from("local credential verification has failed"),
+                ));
+            }
+        }
+
+        match credential.data.typ {
+            CredentialType::Voucher => {
+                trace!("the credential is a bandwidth voucher. attempting to release the funds");
+                let api_clients = self
+                    .inner
+                    .shared_state
+                    .coconut_verifier
+                    .api_clients(credential.data.epoch_id)
+                    .await?;
+
+                self.inner
+                    .shared_state
+                    .coconut_verifier
+                    .release_bandwidth_voucher_funds(&api_clients, credential)
+                    .await?;
+            }
+            CredentialType::FreePass => {
+                // no need to do anything special here, we already extracted the bandwidth amount and checked expiry
+                info!("received a free pass credential");
+            }
+        }
+
+        // technically this is not atomic, i.e. checking for the spending and then marking as spent,
+        // but because we have the `UNIQUE` constraint on the database table
+        // if somebody attempts to spend the same credential in another, parallel request,
+        // one of them will fail
+        //
+        // mark the credential as spent
+        // TODO: technically this should be done under a storage transaction so that if we experience any
+        // failures later on, it'd get reverted
+        trace!("storing serial number information");
+        self.inner
+            .storage
+            .insert_spent_credential(
+                serial_number,
+                freepass_expiration.is_some(),
+                self.client.address,
+            )
+            .await?;
+
+        trace!("increasing client bandwidth");
+        self.increase_bandwidth(bandwidth).await?;
+        // set free pass expiration
+        if let Some(expiration) = freepass_expiration {
+            self.set_freepass_expiration(expiration).await?;
+        }
+
+        let available_total = self.client_bandwidth.bandwidth.bytes;
+
+        Ok(ServerResponse::Bandwidth { available_total })
+    }
+
+    async fn handle_bandwidth_v1(
+        &mut self,
+        enc_credential: Vec<u8>,
+        iv: Vec<u8>,
+    ) -> Result<ServerResponse, RequestHandlingError> {
+        debug!("handling v1 bandwidth request");
+
+        let iv = IV::try_from_bytes(&iv)?;
+        let credential = ClientControlRequest::try_from_enc_coconut_bandwidth_credential_v1(
+            enc_credential,
+            &self.client.shared_keys,
+            iv,
+        )?;
+
+        self.handle_bandwidth_request(credential.try_into()?).await
+    }
+
     /// Tries to handle the received bandwidth request by checking correctness of the received data
     /// and if successful, increases client's bandwidth by an appropriate amount.
     ///
@@ -194,81 +423,67 @@ where
     ///
     /// * `enc_credential`: raw encrypted bandwidth credential to verify.
     /// * `iv`: fresh iv used for the credential.
-    async fn handle_bandwidth(
+    async fn handle_bandwidth_v2(
         &mut self,
         enc_credential: Vec<u8>,
         iv: Vec<u8>,
     ) -> Result<ServerResponse, RequestHandlingError> {
+        debug!("handling v2 bandwidth request");
+
         let iv = IV::try_from_bytes(&iv)?;
-        let credential = ClientControlRequest::try_from_enc_coconut_bandwidth_credential(
+        let credential = ClientControlRequest::try_from_enc_coconut_bandwidth_credential_v2(
             enc_credential,
             &self.client.shared_keys,
             iv,
         )?;
 
-        // Get the latest coconut signers and their VK
-        let credential_api_clients = self
-            .inner
-            .coconut_verifier
-            .all_coconut_api_clients(*credential.epoch_id())
-            .await?;
-        let current_api_clients = self
-            .inner
-            .coconut_verifier
-            .all_current_coconut_api_clients()
-            .await?;
-        if credential_api_clients.is_empty() || current_api_clients.is_empty() {
-            return Err(RequestHandlingError::NotEnoughNymAPIs {
-                received: 0,
-                needed: 1,
-            });
-        }
-
-        let aggregated_verification_key =
-            nym_credentials::obtain_aggregate_verification_key(&credential_api_clients).await?;
-
-        if !credential.verify(&aggregated_verification_key) {
-            return Err(RequestHandlingError::InvalidBandwidthCredential(
-                String::from("credential failed to verify on gateway"),
-            ));
-        }
-
-        self.inner
-            .coconut_verifier
-            .release_funds(current_api_clients, &credential)
-            .await?;
-
-        let bandwidth = Bandwidth::from(credential);
-        let bandwidth_value = bandwidth.value();
-
-        if bandwidth_value > i64::MAX as u64 {
-            // note that this would have represented more than 1 exabyte,
-            // which is like 125,000 worth of hard drives so I don't think we have
-            // to worry about it for now...
-            warn!("Somehow we received bandwidth value higher than 9223372036854775807. We don't really want to deal with this now");
-            return Err(RequestHandlingError::UnsupportedBandwidthValue(
-                bandwidth_value,
-            ));
-        }
-
-        self.increase_bandwidth(bandwidth_value as i64).await?;
-        let available_total = self.get_available_bandwidth().await?;
-
-        Ok(ServerResponse::Bandwidth { available_total })
+        self.handle_bandwidth_request(credential).await
     }
 
     async fn handle_claim_testnet_bandwidth(
         &mut self,
     ) -> Result<ServerResponse, RequestHandlingError> {
-        if self.inner.only_coconut_credentials {
+        debug!("handling testnet bandwidth request");
+
+        if self.inner.shared_state.only_coconut_credentials {
             return Err(RequestHandlingError::OnlyCoconutCredentials);
         }
 
         self.increase_bandwidth(FREE_TESTNET_BANDWIDTH_VALUE)
             .await?;
-        let available_total = self.get_available_bandwidth().await?;
+        let available_total = self.client_bandwidth.bandwidth.bytes;
 
         Ok(ServerResponse::Bandwidth { available_total })
+    }
+
+    async fn flush_bandwidth(&mut self) -> Result<(), RequestHandlingError> {
+        trace!("flushing client bandwidth to the underlying storage");
+        self.inner
+            .storage
+            .set_bandwidth(self.client.address, self.client_bandwidth.bandwidth.bytes)
+            .await?;
+        self.client_bandwidth.update_flush_data();
+        Ok(())
+    }
+
+    async fn try_use_bandwidth(
+        &mut self,
+        required_bandwidth: i64,
+    ) -> Result<i64, RequestHandlingError> {
+        if self.client_bandwidth.bandwidth.freepass_expired() {
+            self.expire_freepass().await?;
+        }
+        let available_bandwidth = self.client_bandwidth.bandwidth.bytes;
+
+        if available_bandwidth < required_bandwidth {
+            return Err(RequestHandlingError::OutOfBandwidth {
+                required: required_bandwidth,
+                available: available_bandwidth,
+            });
+        }
+
+        self.consume_bandwidth(required_bandwidth).await?;
+        Ok(self.client_bandwidth.bandwidth.bytes)
     }
 
     /// Tries to handle request to forward sphinx packet into the network. The request can only succeed
@@ -280,24 +495,16 @@ where
     ///
     /// * `mix_packet`: packet received from the client that should get forwarded into the network.
     async fn handle_forward_sphinx(
-        &self,
+        &mut self,
         mix_packet: MixPacket,
     ) -> Result<ServerResponse, RequestHandlingError> {
-        let consumed_bandwidth = mix_packet.packet().len() as i64;
+        let required_bandwidth = mix_packet.packet().len() as i64;
 
-        let available_bandwidth = self.get_available_bandwidth().await?;
-
-        if available_bandwidth < consumed_bandwidth {
-            return Ok(ServerResponse::new_error(
-                "Insufficient bandwidth available",
-            ));
-        }
-
-        self.consume_bandwidth(consumed_bandwidth).await?;
+        let remaining_bandwidth = self.try_use_bandwidth(required_bandwidth).await?;
         self.forward_packet(mix_packet);
 
         Ok(ServerResponse::Send {
-            remaining_bandwidth: available_bandwidth - consumed_bandwidth,
+            remaining_bandwidth,
         })
     }
 
@@ -306,7 +513,8 @@ where
     /// # Arguments
     ///
     /// * `bin_msg`: raw message to handle.
-    async fn handle_binary(&self, bin_msg: Vec<u8>) -> Message {
+    async fn handle_binary(&mut self, bin_msg: Vec<u8>) -> Message {
+        trace!("binary request");
         // this function decrypts the request and checks the MAC
         match BinaryRequest::try_from_encrypted_tagged_bytes(bin_msg, &self.client.shared_keys) {
             Err(e) => {
@@ -331,19 +539,56 @@ where
     ///
     /// * `raw_request`: raw message to handle.
     async fn handle_text(&mut self, raw_request: String) -> Message {
+        trace!("text request");
         match ClientControlRequest::try_from(raw_request) {
             Err(e) => RequestHandlingError::InvalidTextRequest(e).into_error_message(),
             Ok(request) => match request {
                 ClientControlRequest::BandwidthCredential { enc_credential, iv } => self
-                    .handle_bandwidth(enc_credential, iv)
+                    .handle_bandwidth_v1(enc_credential, iv)
+                    .await
+                    .into_ws_message(),
+                ClientControlRequest::BandwidthCredentialV2 { enc_credential, iv } => self
+                    .handle_bandwidth_v2(enc_credential, iv)
                     .await
                     .into_ws_message(),
                 ClientControlRequest::ClaimFreeTestnetBandwidth => self
                     .handle_claim_testnet_bandwidth()
                     .await
                     .into_ws_message(),
-                _ => RequestHandlingError::IllegalRequest.into_error_message(),
+                other => RequestHandlingError::IllegalRequest {
+                    additional_context: format!(
+                        "received illegal message of type {} in an authenticated client",
+                        other.name()
+                    ),
+                }
+                .into_error_message(),
             },
+        }
+    }
+
+    /// Handles pong message received from the client.
+    /// If the client is still active, the handler that requested the ping will receive a reply.
+    async fn handle_pong(&mut self, msg: Vec<u8>) {
+        if let Ok(msg) = msg.try_into() {
+            let msg = u64::from_be_bytes(msg);
+            trace!("Received pong from client: {msg}");
+            if let Some((tag, _)) = &self.is_active_ping_pending_reply {
+                if tag == &msg {
+                    debug!("Reporting back to the handler that the client is still active");
+                    // safety:
+                    // the unwrap here is fine as we can only enter this if branch if `self.is_active_ping_pending_reply`
+                    // was a `Some`
+                    #[allow(clippy::unwrap_used)]
+                    let tx = self.is_active_ping_pending_reply.take().unwrap().1;
+                    if let Err(err) = tx.send(IsActive::Active) {
+                        warn!("Failed to send pong reply back to the requesting handler: {err:?}");
+                    }
+                } else {
+                    warn!("Received pong reply from the client with unexpected tag: {msg}",);
+                }
+            }
+        } else {
+            warn!("the received pong message was not a valid u64")
         }
     }
 
@@ -353,13 +598,73 @@ where
     ///
     /// * `raw_request`: raw received websocket message.
     async fn handle_request(&mut self, raw_request: Message) -> Option<Message> {
+        // TODO: this should be added via tracing
+        debug!(
+            "handling request from {}",
+            self.client.address.as_base58_string()
+        );
+
         // apparently tungstenite auto-handles ping/pong/close messages so for now let's ignore
         // them and let's test that claim. If that's not the case, just copy code from
         // desktop nym-client websocket as I've manually handled everything there
         match raw_request {
             Message::Binary(bin_msg) => Some(self.handle_binary(bin_msg).await),
             Message::Text(text_msg) => Some(self.handle_text(text_msg).await),
+            Message::Pong(msg) => {
+                self.handle_pong(msg).await;
+                None
+            }
             _ => None,
+        }
+    }
+
+    /// Send a ping to the connected client and return a tag identifying the ping.
+    async fn send_ping(&mut self) -> Result<u64, WsError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let tag: u64 = rand::thread_rng().gen();
+        debug!("Got request to ping our connection: {}", tag);
+        self.inner
+            .send_websocket_message(Message::Ping(tag.to_be_bytes().to_vec()))
+            .await?;
+        Ok(tag)
+    }
+
+    /// Handles the ping timeout by responding back to the handler that requested the ping.
+    async fn handle_ping_timeout(&mut self) {
+        debug!("Ping timeout expired!");
+        if let Some((_tag, reply_tx)) = self.is_active_ping_pending_reply.take() {
+            if let Err(err) = reply_tx.send(IsActive::NotActive) {
+                warn!("Failed to respond back to the handler requesting the ping: {err:?}");
+            }
+        }
+    }
+
+    async fn handle_is_active_request(
+        &mut self,
+        reply_tx: IsActiveResultSender,
+    ) -> Result<(), WsError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        if self.is_active_ping_pending_reply.is_some() {
+            warn!("Received request to ping the client, but a ping is already in progress!");
+            if let Err(err) = reply_tx.send(IsActive::BusyPinging) {
+                warn!("Failed to respond back to the handler requesting the ping: {err:?}");
+            }
+            return Ok(());
+        }
+
+        match self.send_ping().await {
+            Ok(tag) => {
+                self.is_active_ping_pending_reply = Some((tag, reply_tx));
+                Ok(())
+            }
+            Err(err) => {
+                warn!("Failed to send ping to client: {err}. Assuming the connection is dead.");
+                Err(err)
+            }
         }
     }
 
@@ -373,17 +678,38 @@ where
     {
         trace!("Started listening for ALL incoming requests...");
 
+        // Ping timeout future used to check if the client responded to our ping request
+        let mut ping_timeout: OptionFuture<_> = None.into();
+
         while !shutdown.is_shutdown() {
             tokio::select! {
                 _ = shutdown.recv() => {
                     log::trace!("client_handling::AuthenticatedHandler: received shutdown");
-                }
+                },
+                // Received a request to ping the client to check if it's still active
+                tx = self.is_active_request_receiver.next() => {
+                    match tx {
+                        None => break,
+                        Some(reply_tx) => {
+                            if self.handle_is_active_request(reply_tx).await.is_err() {
+                                break;
+                            }
+                            // NOTE: fuse here due to .is_terminated() check below
+                            ping_timeout = Some(Box::pin(tokio::time::sleep(Duration::from_millis(1000)).fuse())).into();
+                        }
+                    };
+                },
+                // The ping timeout expired, meaning the client didn't respond to our ping request
+                _ = &mut ping_timeout, if !ping_timeout.is_terminated() => {
+                   ping_timeout = None.into();
+                   self.handle_ping_timeout().await;
+                },
                 socket_msg = self.inner.read_websocket_message() => {
                     let socket_msg = match socket_msg {
                         None => break,
                         Some(Ok(socket_msg)) => socket_msg,
                         Some(Err(err)) => {
-                            error!("failed to obtain message from websocket stream! stopping connection handler: {err}");
+                            debug!("failed to obtain message from websocket stream! stopping connection handler: {err}");
                             break;
                         }
                     };
@@ -394,7 +720,7 @@ where
 
                     if let Some(response) = self.handle_request(socket_msg).await {
                         if let Err(err) = self.inner.send_websocket_message(response).await {
-                            warn!(
+                            debug!(
                                 "Failed to send message over websocket: {err}. Assuming the connection is dead.",
                             );
                             break;
@@ -402,9 +728,15 @@ where
                     }
                 },
                 mix_messages = self.mix_receiver.next() => {
-                    let mix_messages = mix_messages.expect("sender was unexpectedly closed! this shouldn't have ever happened!");
+                    let mix_messages = match mix_messages {
+                        None => {
+                            debug!("mix receiver was closed! Assuming the connection is dead.");
+                            break;
+                        }
+                        Some(mix_messages) => mix_messages,
+                    };
                     if let Err(err) = self.inner.push_packets_to_client(&self.client.shared_keys, mix_messages).await {
-                        warn!("failed to send the unwrapped sphinx packets back to the client - {err}, assuming the connection is dead");
+                        debug!("failed to send the unwrapped sphinx packets back to the client - {err}, assuming the connection is dead");
                         break;
                     }
                 }

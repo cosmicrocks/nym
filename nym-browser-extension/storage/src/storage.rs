@@ -1,13 +1,20 @@
 // Copyright 2023 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
+// I'm not convinced by the lint (on Arc<WasmStorage>).
+// Sure. wasm is currently single threaded and does not require `Send` or `Sync`
+// but this data is moved across futures, so imo we should leave the Arc as it is,
+// because it might cause us headache in the future
+#![allow(clippy::arc_with_non_send_sync)]
+
 use crate::ExtensionStorageError;
 use js_sys::Promise;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
-use wasm_utils::storage::{IdbVersionChangeEvent, WasmStorage};
-use wasm_utils::{check_promise_result, PromisableResult, PromisableResultError};
+use wasm_storage::{IdbVersionChangeEvent, WasmStorage};
+use wasm_utils::check_promise_result;
+use wasm_utils::error::{PromisableResult, PromisableResultError};
 use zeroize::Zeroizing;
 
 const STORAGE_NAME: &str = "nym-wallet-extension";
@@ -25,6 +32,7 @@ pub struct ExtensionStorage {
     inner: Arc<WasmStorage>,
 }
 
+#[allow(clippy::type_complexity)]
 fn db_migration() -> Box<dyn Fn(&IdbVersionChangeEvent) -> Result<(), JsValue>> {
     Box::new(|evt: &IdbVersionChangeEvent| -> Result<(), JsValue> {
         // Even if the web-sys bindings expose the version as a f64, the IndexedDB API

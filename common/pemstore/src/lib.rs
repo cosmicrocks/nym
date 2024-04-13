@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::traits::{PemStorableKey, PemStorableKeyPair};
-use pem::{self, Pem};
+use pem::Pem;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -51,7 +51,11 @@ where
     if T::pem_type() != key_pem.tag {
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            "unexpected key pem tag",
+            format!(
+                "unexpected key pem tag. Got '{}', expected: '{}'",
+                key_pem.tag,
+                T::pem_type()
+            ),
         ));
     }
 

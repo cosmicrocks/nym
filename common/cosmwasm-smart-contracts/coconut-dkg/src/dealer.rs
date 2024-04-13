@@ -1,35 +1,46 @@
 // Copyright 2022 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::types::{ContractSafeBytes, EncodedBTEPublicKeyWithProof, NodeIndex};
+use crate::types::{EncodedBTEPublicKeyWithProof, NodeIndex};
+use cosmwasm_schema::cw_serde;
 use cosmwasm_std::Addr;
-use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
 pub struct DealerDetails {
     pub address: Addr,
     pub bte_public_key_with_proof: EncodedBTEPublicKeyWithProof,
+    pub ed25519_identity: String,
     pub announce_address: String,
     pub assigned_index: NodeIndex,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
+pub struct DealerRegistrationDetails {
+    pub bte_public_key_with_proof: EncodedBTEPublicKeyWithProof,
+    pub ed25519_identity: String,
+    pub announce_address: String,
+}
+
+#[cw_serde]
+#[derive(Copy)]
 pub enum DealerType {
-    Current,
-    Past,
+    Current { assigned_index: NodeIndex },
+    Past { assigned_index: NodeIndex },
     Unknown,
 }
 
 impl DealerType {
     pub fn is_current(&self) -> bool {
-        matches!(&self, DealerType::Current)
+        matches!(&self, DealerType::Current { .. })
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
+pub struct RegisteredDealerDetails {
+    pub details: Option<DealerRegistrationDetails>,
+}
+
+#[cw_serde]
 pub struct DealerDetailsResponse {
     pub details: Option<DealerDetails>,
     pub dealer_type: DealerType,
@@ -44,11 +55,12 @@ impl DealerDetailsResponse {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
 pub struct PagedDealerResponse {
     pub dealers: Vec<DealerDetails>,
     pub per_page: usize,
+
+    /// Field indicating paging information for the following queries if the caller wishes to get further entries.
     pub start_next_after: Option<Addr>,
 }
 
@@ -66,36 +78,18 @@ impl PagedDealerResponse {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ContractDealing {
-    pub dealing: ContractSafeBytes,
-    pub dealer: Addr,
-}
+#[cw_serde]
+pub struct PagedDealerIndexResponse {
+    pub indices: Vec<(Addr, NodeIndex)>,
 
-impl ContractDealing {
-    pub fn new(dealing: ContractSafeBytes, dealer: Addr) -> Self {
-        ContractDealing { dealing, dealer }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct PagedDealingsResponse {
-    pub dealings: Vec<ContractDealing>,
-    pub per_page: usize,
+    /// Field indicating paging information for the following queries if the caller wishes to get further entries.
     pub start_next_after: Option<Addr>,
 }
 
-impl PagedDealingsResponse {
-    pub fn new(
-        dealings: Vec<ContractDealing>,
-        per_page: usize,
-        start_next_after: Option<Addr>,
-    ) -> Self {
-        PagedDealingsResponse {
-            dealings,
-            per_page,
+impl PagedDealerIndexResponse {
+    pub fn new(indices: Vec<(Addr, NodeIndex)>, start_next_after: Option<Addr>) -> Self {
+        PagedDealerIndexResponse {
+            indices,
             start_next_after,
         }
     }

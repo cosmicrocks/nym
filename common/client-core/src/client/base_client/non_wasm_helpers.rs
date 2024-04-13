@@ -1,4 +1,4 @@
-// Copyright 2022-2023 - Nym Technologies SA <contact@nymtech.net>
+// Copyright 2022-2024 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::client::replies::reply_storage::{
@@ -7,11 +7,12 @@ use crate::client::replies::reply_storage::{
 use crate::config;
 use crate::config::Config;
 use crate::error::ClientCoreError;
-use log::{error, info};
+use log::{error, info, trace};
 use nym_bandwidth_controller::BandwidthController;
+use nym_client_core_gateways_storage::OnDiskGatewaysDetails;
 use nym_credential_storage::storage::Storage as CredentialStorage;
-use nym_validator_client::nyxd::QueryNyxdClient;
-use nym_validator_client::Client;
+use nym_validator_client::nyxd;
+use nym_validator_client::QueryHttpRpcNyxdClient;
 use std::path::Path;
 use std::{fs, io};
 use time::OffsetDateTime;
@@ -101,51 +102,52 @@ pub async fn setup_fs_reply_surb_backend<P: AsRef<Path>>(
     }
 }
 
+pub async fn setup_fs_gateways_storage<P: AsRef<Path>>(
+    db_path: P,
+) -> Result<OnDiskGatewaysDetails, ClientCoreError> {
+    trace!("setting up gateways details storage");
+    OnDiskGatewaysDetails::init(db_path)
+        .await
+        .map_err(|source| ClientCoreError::GatewaysDetailsStoreError {
+            source: Box::new(source),
+        })
+}
+
 pub fn create_bandwidth_controller<St: CredentialStorage>(
     config: &Config,
     storage: St,
-) -> BandwidthController<Client<QueryNyxdClient>, St> {
+) -> BandwidthController<QueryHttpRpcNyxdClient, St> {
     let nyxd_url = config
         .get_validator_endpoints()
         .pop()
         .expect("No nyxd validator endpoint provided");
-    let api_url = config
-        .get_nym_api_endpoints()
-        .pop()
-        .expect("No validator api endpoint provided");
 
-    create_bandwidth_controller_with_urls(nyxd_url, api_url, storage)
+    create_bandwidth_controller_with_urls(nyxd_url, storage)
 }
 
 pub fn create_bandwidth_controller_with_urls<St: CredentialStorage>(
     nyxd_url: Url,
-    nym_api_url: Url,
     storage: St,
-) -> BandwidthController<Client<QueryNyxdClient>, St> {
-    let client = default_query_dkg_client(nyxd_url, nym_api_url);
+) -> BandwidthController<QueryHttpRpcNyxdClient, St> {
+    let client = default_query_dkg_client(nyxd_url);
 
     BandwidthController::new(storage, client)
 }
 
-pub fn default_query_dkg_client_from_config(config: &Config) -> Client<QueryNyxdClient> {
+pub fn default_query_dkg_client_from_config(config: &Config) -> QueryHttpRpcNyxdClient {
     let nyxd_url = config
         .get_validator_endpoints()
         .pop()
         .expect("No nyxd validator endpoint provided");
-    let api_url = config
-        .get_nym_api_endpoints()
-        .pop()
-        .expect("No validator api endpoint provided");
 
-    default_query_dkg_client(nyxd_url, api_url)
+    default_query_dkg_client(nyxd_url)
 }
 
-pub fn default_query_dkg_client(nyxd_url: Url, nym_api_url: Url) -> Client<QueryNyxdClient> {
+pub fn default_query_dkg_client(nyxd_url: Url) -> QueryHttpRpcNyxdClient {
     let details = nym_network_defaults::NymNetworkDetails::new_from_env();
-    let mut client_config = nym_validator_client::Config::try_from_nym_network_details(&details)
+    let client_config = nyxd::Config::try_from_nym_network_details(&details)
         .expect("failed to construct validator client config");
     // overwrite env configuration with config URLs
-    client_config = client_config.with_urls(nyxd_url, nym_api_url);
-    nym_validator_client::Client::new_query(client_config)
+    QueryHttpRpcNyxdClient::connect(client_config, nyxd_url.as_str())
         .expect("Could not construct query client")
 }

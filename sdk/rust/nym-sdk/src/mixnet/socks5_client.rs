@@ -1,7 +1,7 @@
 use nym_client_core::client::base_client::ClientState;
 use nym_socks5_client_core::config::Socks5;
 use nym_sphinx::addressing::clients::Recipient;
-use nym_task::{connections::LaneQueueLengths, TaskManager};
+use nym_task::{connections::LaneQueueLengths, TaskHandle};
 
 use nym_topology::NymTopology;
 
@@ -17,8 +17,8 @@ pub struct Socks5MixnetClient {
     /// current message send queue length.
     pub(crate) client_state: ClientState,
 
-    /// The task manager that controlls all the spawned tasks that the clients uses to do it's job.
-    pub(crate) task_manager: TaskManager,
+    /// The task manager that controls all the spawned tasks that the clients uses to do it's job.
+    pub(crate) task_handle: TaskHandle,
 
     /// SOCKS5 configuration parameters.
     pub(crate) socks5_config: Socks5,
@@ -43,8 +43,7 @@ impl Socks5MixnetClient {
     pub async fn connect_new<S: Into<String>>(provider_mix_address: S) -> Result<Self> {
         MixnetClientBuilder::new_ephemeral()
             .socks5_config(Socks5::new(provider_mix_address))
-            .build()
-            .await?
+            .build()?
             .connect_to_mixnet_via_socks5()
             .await
     }
@@ -57,7 +56,7 @@ impl Socks5MixnetClient {
 
     /// Get the SOCKS5 proxy URL that a HTTP(S) client can connect to.
     pub fn socks5_url(&self) -> String {
-        format!("socks5h://127.0.0.1:{}", self.socks5_config.listening_port)
+        format!("socks5h://{}", self.socks5_config.bind_address)
     }
 
     /// Get a shallow clone of [`LaneQueueLengths`]. This is useful to manually implement some form
@@ -87,8 +86,13 @@ impl Socks5MixnetClient {
 
     /// Disconnect from the mixnet. Currently it is not supported to reconnect a disconnected
     /// client.
-    pub async fn disconnect(&mut self) {
-        self.task_manager.signal_shutdown().ok();
-        self.task_manager.wait_for_shutdown().await;
+    pub async fn disconnect(mut self) {
+        if let TaskHandle::Internal(task_manager) = &mut self.task_handle {
+            task_manager.signal_shutdown().ok();
+            task_manager.wait_for_shutdown().await;
+        }
+
+        // note: it's important to take ownership of the struct as if the shutdown is `TaskHandle::External`,
+        // it must be dropped to finalize the shutdown
     }
 }

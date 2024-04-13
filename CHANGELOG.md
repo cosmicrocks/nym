@@ -4,6 +4,204 @@ Post 1.0.0 release, the changelog format is based on [Keep a Changelog](https://
 
 ## [Unreleased]
 
+## [2024.1-marabou] (2024-02-15)
+
+**New Features:**
+- Introduced nymvisor support for nym-api, gateway, and mixnode binaries ([#4158])
+- Revamped nym-api execution with the addition of init and run commands ([#4225])
+
+**Enhancements:**
+- Implemented internal improvements for gateways to optimize internal packet routing
+- Improved routing score calculation
+
+**Bug Fixes:**
+- Resolved various bugs to enhance overall stability
+
+[#4158]: https://github.com/nymtech/nym/pull/4158
+[#4225]: https://github.com/nymtech/nym/pull/4225
+
+
+## [2023.5-rolo] (2023-11-28)
+
+- Gateway won't open websocket listener until embedded Network Requester becomes available ([#4166])
+- Feature/gateway described nr ([#4147])
+- Bugfix/prerelease versionbump ([#4145])
+- returning 'nil' for non-existing origin as opposed to an empty string ([#4135])
+- using performance^20 when calculating active set selection weight ([#4126])
+- Change default http API timeout from 3s to 10s ([#4117])
+
+[#4166]: https://github.com/nymtech/nym/issues/4166
+[#4147]: https://github.com/nymtech/nym/pull/4147
+[#4145]: https://github.com/nymtech/nym/pull/4145
+[#4135]: https://github.com/nymtech/nym/pull/4135
+[#4126]: https://github.com/nymtech/nym/pull/4126
+[#4117]: https://github.com/nymtech/nym/pull/4117
+
+## [2023.nyxd-upgrade] (2023-11-22)
+
+- Chore/nyxd 043 upgrade ([#3968])
+
+[#3968]: https://github.com/nymtech/nym/pull/3968
+
+## [2023.4-galaxy] (2023-11-07)
+
+- DRY up client cli ([#4077])
+- [mixnode] replace rocket with axum ([#4071])
+- incorporate the nym node HTTP api into the mixnode ([#4070])
+- replaced '--disable-sign-ext' with '--signext-lowering' when running wasm-opt ([#3896])
+- Added PPA repo hosting support and nym-mixnode package with tooling for publishing ([#4165])
+
+[#4077]: https://github.com/nymtech/nym/pull/4077
+[#4071]: https://github.com/nymtech/nym/pull/4071
+[#4070]: https://github.com/nymtech/nym/issues/4070
+[#3896]: https://github.com/nymtech/nym/pull/3896
+[#4165]: https://github.com/nymtech/nym/pull/4165
+
+## [2023.3-kinder] (2023-10-31)
+
+- suppress error output ([#4056])
+- Update frontend type for current vesting period ([#4042])
+- re-exported additional types for tx queries ([#4036])
+- fixed fmt::Display impl for GatewayNetworkRequesterDetails ([#4033])
+- Add exit node policy from TorNull and Tor Exit Node Policy ([#4024])
+- basic self-described api for gateways to dynamically announce its details + nym-api aggregation ([#4017])
+- use saturating sub in case outfox is not enabled ([#3986])
+- Fix sorting for mixnodes and gateways ([#3985])
+- Gateway client registry and api routes ([#3955])
+- Feature/configurable socks5 bind address ([#3992])
+
+[#4056]: https://github.com/nymtech/nym/pull/4056
+[#4042]: https://github.com/nymtech/nym/pull/4042
+[#4036]: https://github.com/nymtech/nym/pull/4036
+[#4033]: https://github.com/nymtech/nym/pull/4033
+[#4024]: https://github.com/nymtech/nym/issues/4024
+[#4017]: https://github.com/nymtech/nym/issues/4017
+[#3986]: https://github.com/nymtech/nym/pull/3986
+[#3985]: https://github.com/nymtech/nym/pull/3985
+[#3955]: https://github.com/nymtech/nym/pull/3955
+[#3992]: https://github.com/nymtech/nym/pull/3992
+
+## [2023.1-milka] (2023-09-24)
+
+- custom Debug impl for mix::Node and gateway::Node ([#3930])
+- added forceTls argument to 'MixFetchOptsSimple' ([#3907])
+- Enable loop cover traffic by default in NR ([#3904])
+- Fix all the cargo warnings ([#3899])
+- [Issue] nym-socks5-client crash on UDP request ([#3898])
+- Feature/gateway inbuilt nr ([#3877])
+- removed queued mixnet migration that was already run ([#3872])
+- [feat] Socks5 and Native client: run with hardcoded topology ([#3866])
+- Introduce a local network requester directly inside a gateway ([#3838])
+
+[#3930]: https://github.com/nymtech/nym/pull/3930
+[#3907]: https://github.com/nymtech/nym/pull/3907
+[#3904]: https://github.com/nymtech/nym/pull/3904
+[#3899]: https://github.com/nymtech/nym/pull/3899
+[#3898]: https://github.com/nymtech/nym/issues/3898
+[#3877]: https://github.com/nymtech/nym/pull/3877
+[#3872]: https://github.com/nymtech/nym/pull/3872
+[#3866]: https://github.com/nymtech/nym/pull/3866
+[#3838]: https://github.com/nymtech/nym/issues/3838
+
+## [v1.1.31-kitkat] (2023-09-12)
+
+- feat: add name to `TaskClient` ([#3844])
+- added 'open_proxy', 'enabled_statistics' and 'statistics_recipient' to NR config ([#3839])
+- MixFetch: initial prototype for insecure HTTP ([#3645])
+- MixFetch: prototype implementing TLS in WASM for HTTPS ([#3644])
+- SDK: build package for NodeJS ([#3558])
+- [Issue] There is already an open connection to this client ([#2845])
+
+[#3844]: https://github.com/nymtech/nym/pull/3844
+[#3839]: https://github.com/nymtech/nym/pull/3839
+[#3645]: https://github.com/nymtech/nym/issues/3645
+[#3644]: https://github.com/nymtech/nym/issues/3644
+[#3558]: https://github.com/nymtech/nym/issues/3558
+[#2845]: https://github.com/nymtech/nym/issues/2845
+
+## [v1.1.30-twix] (2023-09-05)
+
+- geo_aware_provider: fix too much filtering of gateways ([#3826])
+- network-requester: add description to config ([#3799])
+- Speedy mode - selects gateway based on latency  in medium / speedy mode ([#3770])
+- Chore/enable versioning ([#3768])
+- Create explorer-client and use in geo aware provider ([#3824])
+
+[#3826]: https://github.com/nymtech/nym/pull/3826
+[#3799]: https://github.com/nymtech/nym/pull/3799
+[#3770]: https://github.com/nymtech/nym/issues/3770
+[#3768]: https://github.com/nymtech/nym/pull/3768
+[#3824]: https://github.com/nymtech/nym/pull/3824
+
+## [v1.1.29-snickers] (2023-08-29)
+
+- Add EXPLORER_API configurable url ([#3810])
+- Bugfix/use correct tendermint dialect ([#3802])
+- Explorer - look up gateways based on geo-location ([#3776])
+- Speedy mode - select the mixnodes based on the location of the NR ([#3775])
+- NR - reduce response time by removing poisson delay ([#3774])
+- [demo] libp2p example with nym-sdk ([#3763])
+- introduced /network/details endpoint to nym-api to return used network information ([#3758])
+- Feature/issue credentials ([#3691])
+
+[#3810]: https://github.com/nymtech/nym/pull/3810
+[#3802]: https://github.com/nymtech/nym/pull/3802
+[#3776]: https://github.com/nymtech/nym/issues/3776
+[#3775]: https://github.com/nymtech/nym/issues/3775
+[#3774]: https://github.com/nymtech/nym/issues/3774
+[#3763]: https://github.com/nymtech/nym/pull/3763
+[#3758]: https://github.com/nymtech/nym/pull/3758
+[#3691]: https://github.com/nymtech/nym/pull/3691
+
+## [v1.1.28] (2023-08-22)
+
+- [final step3]: add [rust] support to nyxd client in wasm ([#3743])
+- Feature/ephemera upgrade ([#3791])
+- [rust-sdk] feat: make it more convenient to send and receive messages in different tasks ([#3756])
+- feat: validator client refactoring + wasm compatible nyxd client ([#3726])
+- feat: retain connection between client init and run ([#3767])
+
+[#3743]: https://github.com/nymtech/nym/issues/3743
+[#3791]: https://github.com/nymtech/nym/pull/3791
+[#3756]: https://github.com/nymtech/nym/pull/3756
+[#3726]: https://github.com/nymtech/nym/pull/3726
+[#3767]: https://github.com/nymtech/nym/pull/3767
+
+
+## [v1.1.27] (2023-08-16)
+
+- fix serialisation of contract types ([#3752])
+- Investigate spending credentials from the main API (coconut enabled to a gateway) from feature/ephemera branch ([#3741])
+- NymConnect UI stuck in showing "Gateway has issues" ([#3594])
+- [UPDATE] Update MiniBolt community-applications-and-guides dev docs ([#3754])
+
+[#3752]: https://github.com/nymtech/nym/issues/3752
+[#3741]: https://github.com/nymtech/nym/issues/3741
+[#3594]: https://github.com/nymtech/nym/issues/3594
+[#3754]: https://github.com/nymtech/nym/pull/3754
+
+## [v1.1.24] (2023-08-08)
+
+- Latency based gateway selection is serial and slow ([#3710])
+- Network-requester: strip comments from allow lists ([#3625])
+- Remove (or start maintaining) `upgrade` commands from all binaries ([#3600])
+- Set sphinx as default packet type ([#3748])
+- Apply fix from feature/ephemera to develop too (#3698) ([#3742])
+- Feature/coco demos ([#3732])
+- Add updates to community list projects ([#3722])
+- Add geo-aware mixnet topology provider ([#3713])
+- Add updates to community list projects ([#3711])
+
+[#3710]: https://github.com/nymtech/nym/issues/3710
+[#3625]: https://github.com/nymtech/nym/issues/3625
+[#3600]: https://github.com/nymtech/nym/issues/3600
+[#3748]: https://github.com/nymtech/nym/pull/3748
+[#3742]: https://github.com/nymtech/nym/pull/3742
+[#3732]: https://github.com/nymtech/nym/pull/3732
+[#3722]: https://github.com/nymtech/nym/pull/3722
+[#3713]: https://github.com/nymtech/nym/pull/3713
+[#3711]: https://github.com/nymtech/nym/pull/3711
+
 ## [v1.1.23] (2023-07-04)
 
 - nym-cli: add client identity key signing support ([#3576])

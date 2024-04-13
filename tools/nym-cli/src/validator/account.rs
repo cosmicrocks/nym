@@ -52,6 +52,13 @@ pub(crate) async fn execute(
             )
             .await;
         }
+        Some(nym_cli_commands::validator::account::AccountCommands::SendMultiple(args)) => {
+            nym_cli_commands::validator::account::send_multiple::send_multiple(
+                args,
+                &create_signing_client(global_args, network_details)?,
+            )
+            .await;
+        }
         _ => unreachable!(),
     }
 
@@ -64,9 +71,7 @@ fn get_account_from_mnemonic(
     address: Option<AccountId>,
 ) -> anyhow::Result<Option<AccountId>> {
     Ok(address.or(Some(
-        create_signing_client(global_args, network_details)?
-            .address()
-            .clone(),
+        create_signing_client(global_args, network_details)?.address(),
     )))
 }
 

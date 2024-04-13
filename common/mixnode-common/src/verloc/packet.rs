@@ -3,7 +3,6 @@
 
 use crate::verloc::error::RttError;
 use nym_crypto::asymmetric::identity::{self, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
-use std::convert::TryInto;
 
 pub(crate) struct EchoPacket {
     sequence_number: u64,
@@ -23,7 +22,7 @@ impl EchoPacket {
             .chain(keys.public_key().to_bytes().iter().cloned())
             .collect::<Vec<_>>();
 
-        let signature = keys.private_key().sign(&bytes_to_sign);
+        let signature = keys.private_key().sign(bytes_to_sign);
 
         EchoPacket {
             sequence_number,
@@ -67,7 +66,7 @@ impl EchoPacket {
 
     pub(crate) fn construct_reply(self, private_key: &identity::PrivateKey) -> ReplyPacket {
         let bytes = self.to_bytes();
-        let signature = private_key.sign(&bytes);
+        let signature = private_key.sign(bytes);
         ReplyPacket {
             base_packet: self,
             signature,

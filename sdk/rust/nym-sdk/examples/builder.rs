@@ -1,4 +1,5 @@
 use nym_sdk::mixnet;
+use nym_sdk::mixnet::MixnetMessageSender;
 
 #[tokio::main]
 async fn main() {
@@ -8,7 +9,6 @@ async fn main() {
     // where you don't want to connect just yet.
     let client = mixnet::MixnetClientBuilder::new_ephemeral()
         .build()
-        .await
         .unwrap();
 
     // Now we connect to the mixnet, using ephemeral keys already created
@@ -19,7 +19,10 @@ async fn main() {
     println!("Our client nym address is: {our_address}");
 
     // Send a message through the mixnet to ourselves
-    client.send_str(*our_address, "hello there").await;
+    client
+        .send_plain_message(*our_address, "hello there")
+        .await
+        .unwrap();
 
     println!("Waiting for message");
     if let Some(received) = client.wait_for_messages().await {

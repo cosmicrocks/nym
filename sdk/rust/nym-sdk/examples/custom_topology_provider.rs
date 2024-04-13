@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use nym_sdk::mixnet;
+use nym_sdk::mixnet::MixnetMessageSender;
 use nym_topology::provider_trait::{async_trait, TopologyProvider};
 use nym_topology::{nym_topology_from_detailed, NymTopology};
 use url::Url;
@@ -59,7 +60,6 @@ async fn main() {
     let mut client = mixnet::MixnetClientBuilder::new_ephemeral()
         .custom_topology_provider(Box::new(my_topology_provider))
         .build()
-        .await
         .unwrap()
         .connect_to_mixnet()
         .await
@@ -69,7 +69,10 @@ async fn main() {
     println!("Our client nym address is: {our_address}");
 
     // Send a message through the mixnet to ourselves
-    client.send_str(*our_address, "hello there").await;
+    client
+        .send_plain_message(*our_address, "hello there")
+        .await
+        .unwrap();
 
     println!("Waiting for message (ctrl-c to exit)");
     client

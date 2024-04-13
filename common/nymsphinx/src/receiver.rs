@@ -169,6 +169,10 @@ pub struct SphinxMessageReceiver {
 
 impl SphinxMessageReceiver {
     /// Allows setting non-default number of expected mix hops in the network.
+    // IMPORTANT NOTE: this is among others used to deserialize SURBs. Meaning that this is a
+    // global setting and currently always set to the default value. The implication is that it is
+    // not currently possible to have different number of hops for different SURB messages. So,
+    // don't try to use <3 mix hops for SURBs until this is refactored.
     #[must_use]
     pub fn with_mix_hops(mut self, hops: u8) -> Self {
         self.num_mix_hops = hops;
@@ -243,7 +247,7 @@ mod message_receiver {
                 )
                 .unwrap(),
                 layer: Layer::One,
-                version: "0.8.0-dev".to_string(),
+                version: "0.8.0-dev".into(),
             }],
         );
 
@@ -263,7 +267,7 @@ mod message_receiver {
                 )
                 .unwrap(),
                 layer: Layer::Two,
-                version: "0.8.0-dev".to_string(),
+                version: "0.8.0-dev".into(),
             }],
         );
 
@@ -283,7 +287,7 @@ mod message_receiver {
                 )
                 .unwrap(),
                 layer: Layer::Three,
-                version: "0.8.0-dev".to_string(),
+                version: "0.8.0-dev".into(),
             }],
         );
 
@@ -294,7 +298,8 @@ mod message_receiver {
                 owner: "foomp4".to_string(),
                 host: "1.2.3.4".parse().unwrap(),
                 mix_host: "1.2.3.4:1789".parse().unwrap(),
-                clients_port: 9000,
+                clients_ws_port: 9000,
+                clients_wss_port: None,
                 identity_key: identity::PublicKey::from_base58_string(
                     "FioFa8nMmPpQnYi7JyojoTuwGLeyNS8BF4ChPr29zUML",
                 )
@@ -303,7 +308,7 @@ mod message_receiver {
                     "EB42xvMFMD5rUCstE2CDazgQQJ22zLv8SPm1Luxni44c",
                 )
                 .unwrap(),
-                version: "0.8.0-dev".to_string(),
+                version: "0.8.0-dev".into(),
             }],
         )
     }

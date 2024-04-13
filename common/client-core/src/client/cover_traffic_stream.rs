@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::client::mix_traffic::BatchMixMessageSender;
+use crate::client::packet_statistics_control::{PacketStatisticsEvent, PacketStatisticsReporter};
 use crate::client::topology_control::TopologyAccessor;
 use crate::{config, spawn_future};
 use futures::task::{Context, Poll};
@@ -19,10 +20,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::time;
+use tokio::time::{sleep, Sleep};
 
 #[cfg(target_arch = "wasm32")]
-use wasm_timer;
+use wasmtimer::tokio::{sleep, Sleep};
 
 pub struct LoopCoverTrafficStream<R>
 where
@@ -39,11 +40,7 @@ where
 
     /// Internal state, determined by `average_message_sending_delay`,
     /// used to keep track of when a next packet should be sent out.
-    #[cfg(not(target_arch = "wasm32"))]
-    next_delay: Pin<Box<time::Sleep>>,
-
-    #[cfg(target_arch = "wasm32")]
-    next_delay: Pin<Box<wasm_timer::Delay>>,
+    next_delay: Pin<Box<Sleep>>,
 
     /// Channel used for sending prepared nym packets to `MixTrafficController` that sends them
     /// out to the network without any further delays.
@@ -65,6 +62,8 @@ where
     secondary_packet_size: Option<PacketSize>,
 
     packet_type: PacketType,
+
+    stats_tx: PacketStatisticsReporter,
 }
 
 impl<R> Stream for LoopCoverTrafficStream<R>
@@ -90,17 +89,9 @@ where
 
         // The next interval value is `next_poisson_delay` after the one that just
         // yielded.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let now = self.next_delay.deadline();
-            let next = now + next_poisson_delay;
-            self.next_delay.as_mut().reset(next);
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.next_delay.as_mut().reset(next_poisson_delay);
-        }
+        let now = self.next_delay.deadline();
+        let next = now + next_poisson_delay;
+        self.next_delay.as_mut().reset(next);
 
         Poll::Ready(Some(()))
     }
@@ -109,7 +100,8 @@ where
 // obviously when we finally make shared rng that is on 'higher' level, this should become
 // generic `R`
 impl LoopCoverTrafficStream<OsRng> {
-    pub fn new(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
         ack_key: Arc<AckKey>,
         average_ack_delay: Duration,
         mix_tx: BatchMixMessageSender,
@@ -117,14 +109,11 @@ impl LoopCoverTrafficStream<OsRng> {
         topology_access: TopologyAccessor,
         traffic_config: config::Traffic,
         cover_config: config::CoverTraffic,
+        stats_tx: PacketStatisticsReporter,
     ) -> Self {
         let rng = OsRng;
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let next_delay = Box::pin(time::sleep(Default::default()));
-
-        #[cfg(target_arch = "wasm32")]
-        let next_delay = Box::pin(wasm_timer::Delay::new(Default::default()));
+        let next_delay = Box::pin(sleep(Default::default()));
 
         LoopCoverTrafficStream {
             ack_key,
@@ -138,16 +127,12 @@ impl LoopCoverTrafficStream<OsRng> {
             primary_packet_size: traffic_config.primary_packet_size,
             secondary_packet_size: traffic_config.secondary_packet_size,
             packet_type: traffic_config.packet_type,
+            stats_tx,
         }
     }
 
     fn set_next_delay(&mut self, amount: Duration) {
-        #[cfg(not(target_arch = "wasm32"))]
-        let next_delay = Box::pin(time::sleep(amount));
-
-        #[cfg(target_arch = "wasm32")]
-        let next_delay = Box::pin(wasm_timer::Delay::new(amount));
-
+        let next_delay = Box::pin(sleep(amount));
         self.next_delay = next_delay;
     }
 
@@ -212,6 +197,10 @@ impl LoopCoverTrafficStream<OsRng> {
                     log::warn!("Failed to send cover message - channel closed");
                 }
             }
+        } else {
+            self.stats_tx.report(PacketStatisticsEvent::CoverPacketSent(
+                cover_traffic_packet_size.size(),
+            ));
         }
 
         // TODO: I'm not entirely sure whether this is really required, because I'm not 100%

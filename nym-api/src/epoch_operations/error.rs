@@ -1,5 +1,5 @@
 // Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::node_status_api::models::NymApiStorageError;
 use nym_mixnet_contract_common::{EpochState, MixId};
@@ -47,6 +47,9 @@ pub enum RewardingError {
         #[from]
         source: rand::distributions::WeightedError,
     },
+
+    #[error("{0}")]
+    GenericError(#[from] anyhow::Error),
 }
 
 impl From<NyxdError> for RewardingError {

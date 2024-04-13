@@ -1,3 +1,6 @@
+// Copyright 2023 - Nym Technologies SA <contact@nymtech.net>
+// SPDX-License-Identifier: GPL-3.0-only
+
 use crate::node_status_api::reward_estimate::{compute_apy_from_reward, compute_reward_estimate};
 use crate::support::storage::NymApiStorage;
 use nym_api_requests::models::{GatewayBondAnnotated, MixNodeBondAnnotated, NodePerformance};
@@ -132,7 +135,7 @@ pub(super) async fn annotate_nodes_with_details(
             compute_apy_from_reward(&mixnode, reward_estimate, current_interval);
 
         let family = mix_to_family
-            .get(&mixnode.bond_information.identity().to_string())
+            .get(mixnode.bond_information.identity())
             .cloned();
 
         annotated.push(MixNodeBondAnnotated {
@@ -180,6 +183,7 @@ pub(crate) async fn annotate_gateways_with_details(
         annotated.push(GatewayBondAnnotated {
             blacklisted: blacklist.contains(&gateway_bond.gateway.identity_key),
             gateway_bond,
+            self_described: None,
             performance,
             node_performance,
         });

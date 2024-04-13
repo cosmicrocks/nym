@@ -1,5 +1,5 @@
 // Copyright 2022-2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use crate::support::caching::Cache;
 use nym_api_requests::models::CirculatingSupplyResponse;
@@ -30,9 +30,9 @@ impl<'a> From<&'a CirculatingSupplyCacheData> for CirculatingSupplyResponse {
     fn from(value: &'a CirculatingSupplyCacheData) -> Self {
         CirculatingSupplyResponse {
             total_supply: value.total_supply.clone().into(),
-            mixmining_reserve: value.mixmining_reserve.clone().into_inner().into(),
-            vesting_tokens: value.vesting_tokens.clone().into_inner().into(),
-            circulating_supply: value.circulating_supply.clone().into_inner().into(),
+            mixmining_reserve: value.mixmining_reserve.clone().into(),
+            vesting_tokens: value.vesting_tokens.clone().into(),
+            circulating_supply: value.circulating_supply.clone().into(),
         }
     }
 }

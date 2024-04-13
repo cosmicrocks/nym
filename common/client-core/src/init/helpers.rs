@@ -1,39 +1,39 @@
 // Copyright 2022-2023 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::config::GatewayEndpointConfig;
 use crate::error::ClientCoreError;
+use crate::init::types::RegistrationResult;
 use futures::{SinkExt, StreamExt};
 use log::{debug, info, trace, warn};
 use nym_crypto::asymmetric::identity;
 use nym_gateway_client::GatewayClient;
-use nym_gateway_requests::registration::handshake::SharedKeys;
-use nym_topology::{filter::VersionFilterable, gateway};
+use nym_topology::{filter::VersionFilterable, gateway, mix};
+use nym_validator_client::client::IdentityKeyRef;
 use rand::{seq::SliceRandom, Rng};
 use std::{sync::Arc, time::Duration};
-use tap::TapFallible;
 use tungstenite::Message;
 use url::Url;
 
 #[cfg(not(target_arch = "wasm32"))]
-use nym_validator_client::nyxd::DirectSigningNyxdClient;
-#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::time::sleep;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::connect_async;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-#[cfg(not(target_arch = "wasm32"))]
-type WsConn = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[cfg(target_arch = "wasm32")]
-use nym_bandwidth_controller::wasm_mockups::DirectSigningNyxdClient;
-#[cfg(target_arch = "wasm32")]
-use wasm_timer::Instant;
-#[cfg(target_arch = "wasm32")]
 use wasm_utils::websocket::JSWebsocket;
+#[cfg(target_arch = "wasm32")]
+use wasmtimer::std::Instant;
+#[cfg(target_arch = "wasm32")]
+use wasmtimer::tokio::sleep;
+
+#[cfg(not(target_arch = "wasm32"))]
+type WsConn = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[cfg(target_arch = "wasm32")]
 type WsConn = JSWebsocket;
@@ -65,17 +65,49 @@ pub async fn current_gateways<R: Rng>(
         .ok_or(ClientCoreError::ListOfNymApisIsEmpty)?;
     let client = nym_validator_client::client::NymApiClient::new(nym_api.clone());
 
-    log::trace!("Fetching list of gateways from: {nym_api}");
+    log::debug!("Fetching list of gateways from: {nym_api}");
 
-    let gateways = client.get_cached_gateways().await?;
+    let gateways = client.get_cached_described_gateways().await?;
+    log::debug!("Found {} gateways", gateways.len());
+    log::trace!("Gateways: {:#?}", gateways);
+
     let valid_gateways = gateways
         .into_iter()
         .filter_map(|gateway| gateway.try_into().ok())
         .collect::<Vec<gateway::Node>>();
+    log::debug!("Ater checking validity: {}", valid_gateways.len());
+    log::trace!("Valid gateways: {:#?}", valid_gateways);
 
     // we were always filtering by version so I'm not removing that 'feature'
     let filtered_gateways = valid_gateways.filter_by_version(env!("CARGO_PKG_VERSION"));
+    log::debug!("After filtering for version: {}", filtered_gateways.len());
+    log::trace!("Filtered gateways: {:#?}", filtered_gateways);
+
+    log::info!("nym-api reports {} valid gateways", filtered_gateways.len());
+
     Ok(filtered_gateways)
+}
+
+pub async fn current_mixnodes<R: Rng>(
+    rng: &mut R,
+    nym_apis: &[Url],
+) -> Result<Vec<mix::Node>, ClientCoreError> {
+    let nym_api = nym_apis
+        .choose(rng)
+        .ok_or(ClientCoreError::ListOfNymApisIsEmpty)?;
+    let client = nym_validator_client::client::NymApiClient::new(nym_api.clone());
+
+    log::trace!("Fetching list of mixnodes from: {nym_api}");
+
+    let mixnodes = client.get_cached_mixnodes().await?;
+    let valid_mixnodes = mixnodes
+        .into_iter()
+        .filter_map(|mixnode| (&mixnode.bond_information).try_into().ok())
+        .collect::<Vec<mix::Node>>();
+
+    // we were always filtering by version so I'm not removing that 'feature'
+    let filtered_mixnodes = valid_mixnodes.filter_by_version(env!("CARGO_PKG_VERSION"));
+    Ok(filtered_mixnodes)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -125,14 +157,8 @@ async fn measure_latency(gateway: &gateway::Node) -> Result<GatewayWithLatency, 
             Ok::<(), ClientCoreError>(())
         };
 
-        // thanks to wasm we can't use tokio::time::timeout : (
-        #[cfg(not(target_arch = "wasm32"))]
-        let timeout = tokio::time::sleep(PING_TIMEOUT);
-        #[cfg(not(target_arch = "wasm32"))]
+        let timeout = sleep(PING_TIMEOUT);
         tokio::pin!(timeout);
-
-        #[cfg(target_arch = "wasm32")]
-        let mut timeout = wasm_timer::Delay::new(PING_TIMEOUT);
 
         tokio::select! {
             _ = &mut timeout => {
@@ -155,10 +181,13 @@ async fn measure_latency(gateway: &gateway::Node) -> Result<GatewayWithLatency, 
     Ok(GatewayWithLatency::new(gateway, avg))
 }
 
-pub(super) async fn choose_gateway_by_latency<R: Rng>(
+pub async fn choose_gateway_by_latency<R: Rng>(
     rng: &mut R,
     gateways: &[gateway::Node],
+    must_use_tls: bool,
 ) -> Result<gateway::Node, ClientCoreError> {
+    let gateways = filter_by_tls(gateways, must_use_tls)?;
+
     info!(
         "choosing gateway by latency, pinging {} gateways ...",
         gateways.len()
@@ -194,34 +223,87 @@ pub(super) async fn choose_gateway_by_latency<R: Rng>(
     Ok(chosen.gateway.clone())
 }
 
+fn filter_by_tls(
+    gateways: &[gateway::Node],
+    must_use_tls: bool,
+) -> Result<Vec<&gateway::Node>, ClientCoreError> {
+    if must_use_tls {
+        let filtered = gateways
+            .iter()
+            .filter(|g| g.clients_wss_port.is_some())
+            .collect::<Vec<_>>();
+
+        if filtered.is_empty() {
+            return Err(ClientCoreError::NoWssGateways);
+        }
+
+        Ok(filtered)
+    } else {
+        Ok(gateways.iter().collect())
+    }
+}
+
 pub(super) fn uniformly_random_gateway<R: Rng>(
     rng: &mut R,
     gateways: &[gateway::Node],
+    must_use_tls: bool,
 ) -> Result<gateway::Node, ClientCoreError> {
-    gateways
+    filter_by_tls(gateways, must_use_tls)?
         .choose(rng)
         .ok_or(ClientCoreError::NoGatewaysOnNetwork)
-        .cloned()
+        .map(|&r| r.clone())
+}
+
+pub(super) fn get_specified_gateway(
+    gateway_identity: IdentityKeyRef,
+    gateways: &[gateway::Node],
+    must_use_tls: bool,
+) -> Result<gateway::Node, ClientCoreError> {
+    log::debug!("Requesting specified gateway: {}", gateway_identity);
+    let user_gateway = identity::PublicKey::from_base58_string(gateway_identity)
+        .map_err(ClientCoreError::UnableToCreatePublicKeyFromGatewayId)?;
+
+    let gateway = gateways
+        .iter()
+        .find(|gateway| gateway.identity_key == user_gateway)
+        .ok_or_else(|| ClientCoreError::NoGatewayWithId(gateway_identity.to_string()))?;
+
+    if must_use_tls && gateway.clients_wss_port.is_none() {
+        return Err(ClientCoreError::UnsupportedWssProtocol {
+            gateway: gateway_identity.to_string(),
+        });
+    }
+
+    Ok(gateway.clone())
 }
 
 pub(super) async fn register_with_gateway(
-    gateway: &GatewayEndpointConfig,
+    gateway_id: identity::PublicKey,
+    gateway_listener: Url,
     our_identity: Arc<identity::KeyPair>,
-) -> Result<Arc<SharedKeys>, ClientCoreError> {
-    let timeout = Duration::from_millis(1500);
-    let mut gateway_client: GatewayClient<DirectSigningNyxdClient, _> = GatewayClient::new_init(
-        gateway.gateway_listener.clone(),
-        gateway.try_get_gateway_identity_key()?,
-        our_identity.clone(),
-        timeout,
-    );
-    gateway_client
-        .establish_connection()
-        .await
-        .tap_err(|_| log::warn!("Failed to establish connection with gateway!"))?;
+) -> Result<RegistrationResult, ClientCoreError> {
+    let mut gateway_client =
+        GatewayClient::new_init(gateway_listener, gateway_id, our_identity.clone());
+
+    gateway_client.establish_connection().await.map_err(|err| {
+        log::warn!("Failed to establish connection with gateway!");
+        ClientCoreError::GatewayClientError {
+            gateway_id: gateway_id.to_base58_string(),
+            source: err,
+        }
+    })?;
     let shared_keys = gateway_client
         .perform_initial_authentication()
         .await
-        .tap_err(|_| log::warn!("Failed to register with the gateway!"))?;
-    Ok(shared_keys)
+        .map_err(|err| {
+            log::warn!("Failed to register with the gateway {gateway_id}: {err}");
+            ClientCoreError::GatewayClientError {
+                gateway_id: gateway_id.to_base58_string(),
+                source: err,
+            }
+        })?;
+    Ok(RegistrationResult {
+        shared_keys,
+        authenticated_ephemeral_client: gateway_client,
+    })
 }

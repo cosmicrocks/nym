@@ -1,52 +1,63 @@
 // Copyright 2023 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
-use crate::config::old_config_v1_1_13::OldConfigV1_1_13;
-use crate::config::old_config_v1_1_20::ConfigV1_1_20;
-use crate::config::old_config_v1_1_20_2::ConfigV1_1_20_2;
+use crate::config::helpers::try_upgrade_config_by_id;
 use crate::{
     config::{BaseClientConfig, Config},
     error::NetworkRequesterError,
 };
 use clap::{CommandFactory, Parser, Subcommand};
-use log::{error, info};
+use log::error;
 use nym_bin_common::bin_info;
 use nym_bin_common::completions::{fig_generate, ArgShell};
 use nym_bin_common::version_checker;
-use nym_client_core::client::base_client::storage::gateway_details::{
-    OnDiskGatewayDetails, PersistedGatewayDetails,
-};
-use nym_client_core::client::key_manager::persistence::OnDiskKeys;
-use nym_client_core::config::GatewayEndpointConfig;
-use nym_client_core::error::ClientCoreError;
-use nym_sphinx::params::PacketSize;
+use nym_client_core::cli_helpers::client_import_credential::CommonClientImportCredentialArgs;
+use nym_client_core::cli_helpers::CliClient;
+use nym_config::OptionalSet;
+use std::sync::OnceLock;
 
+mod add_gateway;
 mod build_info;
+mod import_credential;
 mod init;
+mod list_gateways;
 mod run;
 mod sign;
+mod switch_gateway;
 
-lazy_static::lazy_static! {
-    pub static ref PRETTY_BUILD_INFORMATION: String = bin_info!().pretty_print();
+pub(crate) struct CliNetworkRequesterClient;
+
+impl CliClient for CliNetworkRequesterClient {
+    const NAME: &'static str = "network requester";
+    type Error = NetworkRequesterError;
+    type Config = Config;
+
+    async fn try_upgrade_outdated_config(id: &str) -> Result<(), Self::Error> {
+        try_upgrade_config_by_id(id).await
+    }
+
+    async fn try_load_current_config(id: &str) -> Result<Self::Config, Self::Error> {
+        try_load_current_config(id).await
+    }
 }
 
-// Helper for passing LONG_VERSION to clap
 fn pretty_build_info_static() -> &'static str {
-    &PRETTY_BUILD_INFORMATION
+    static PRETTY_BUILD_INFORMATION: OnceLock<String> = OnceLock::new();
+    PRETTY_BUILD_INFORMATION.get_or_init(|| bin_info!().pretty_print())
 }
 
 #[derive(Parser)]
-#[clap(author = "Nymtech", version, about, long_version = pretty_build_info_static())]
+#[command(author = "Nymtech", version, about, long_version = pretty_build_info_static())]
 pub(crate) struct Cli {
     /// Path pointing to an env file that configures the client.
-    #[clap(short, long)]
+    #[arg(short, long)]
     pub(crate) config_env_file: Option<std::path::PathBuf>,
 
     /// Flag used for disabling the printed banner in tty.
-    #[clap(long)]
+    #[arg(long)]
     pub(crate) no_banner: bool,
 
-    #[clap(subcommand)]
+    #[command(subcommand)]
     command: Commands,
 }
 
@@ -62,6 +73,18 @@ pub(crate) enum Commands {
 
     /// Sign to prove ownership of this network requester
     Sign(sign::Sign),
+
+    /// Import a pre-generated credential
+    ImportCredential(CommonClientImportCredentialArgs),
+
+    /// List all registered with gateways
+    ListGateways(list_gateways::Args),
+
+    /// Add new gateway to this client
+    AddGateway(add_gateway::Args),
+
+    /// Change the currently active gateway. Note that you must have already registered with the new gateway!
+    SwitchGateway(switch_gateway::Args),
 
     /// Show build information of this binary
     BuildInfo(build_info::BuildInfo),
@@ -81,29 +104,48 @@ pub(crate) struct OverrideConfig {
     medium_toggle: bool,
     nyxd_urls: Option<Vec<url::Url>>,
     enabled_credentials_mode: Option<bool>,
+
+    open_proxy: Option<bool>,
+    enable_statistics: Option<bool>,
+    statistics_recipient: Option<String>,
 }
 
-pub(crate) fn override_config(config: Config, args: OverrideConfig) -> Config {
-    let disable_cover_traffic_with_keepalive = args.medium_toggle;
-    let secondary_packet_size = args.medium_toggle.then_some(PacketSize::ExtendedPacket16);
-    let no_per_hop_delays = args.medium_toggle;
+// NOTE: make sure this is in sync with `gateway/src/helpers.rs::override_network_requester_config`
+pub(crate) fn override_config(mut config: Config, args: OverrideConfig) -> Config {
+    // as of 12.09.23 the below is true (not sure how this comment will rot in the future)
+    // medium_toggle:
+    // - sets secondary packet size to 16kb
+    // - disables poisson distribution of the main traffic stream
+    // - sets the cover traffic stream to 1 packet / 5s (on average)
+    // - disables per hop delay
+    //
+    // fastmode (to be renamed to `fast-poisson`):
+    // - sets average per hop delay to 10ms
+    // - sets the cover traffic stream to 1 packet / 2000s (on average); for all intents and purposes it disables the stream
+    // - sets the poisson distribution of the main traffic stream to 4ms, i.e. 250 packets / s on average
+    //
+    // no_cover:
+    // - disables poisson distribution of the main traffic stream
+    // - disables the secondary cover traffic stream
+
+    // disable poisson rate in the BASE client if the NR option is enabled
+    if config.network_requester.disable_poisson_rate {
+        config.set_no_poisson_process();
+    }
+
+    // those should be enforced by `clap` when parsing the arguments
+    if args.medium_toggle {
+        assert!(!args.fastmode);
+        assert!(!args.no_cover);
+
+        config.set_medium_toggle();
+    }
 
     config
         .with_base(
             BaseClientConfig::with_high_default_traffic_volume,
             args.fastmode,
         )
-        .with_base(
-            // NOTE: This interacts with disabling cover traffic fully, so we want to this to be set before
-            BaseClientConfig::with_disabled_cover_traffic_with_keepalive,
-            disable_cover_traffic_with_keepalive,
-        )
-        .with_base(
-            BaseClientConfig::with_secondary_packet_size,
-            secondary_packet_size,
-        )
-        .with_base(BaseClientConfig::with_no_per_hop_delays, no_per_hop_delays)
-        // NOTE: see comment above about the order of the other disble cover traffic config
         .with_base(BaseClientConfig::with_disabled_cover_traffic, args.no_cover)
         .with_optional_base_custom_env(
             BaseClientConfig::with_custom_nym_apis,
@@ -121,15 +163,22 @@ pub(crate) fn override_config(config: Config, args: OverrideConfig) -> Config {
             BaseClientConfig::with_disabled_credentials,
             args.enabled_credentials_mode.map(|b| !b),
         )
+        .with_optional(Config::with_open_proxy, args.open_proxy)
+        .with_optional(Config::with_enabled_statistics, args.enable_statistics)
+        .with_optional(Config::with_statistics_recipient, args.statistics_recipient)
 }
 
 pub(crate) async fn execute(args: Cli) -> Result<(), NetworkRequesterError> {
     let bin_name = "nym-network-requester";
 
     match args.command {
-        Commands::Init(m) => init::execute(&m).await?,
+        Commands::Init(m) => init::execute(m).await?,
         Commands::Run(m) => run::execute(&m).await?,
         Commands::Sign(m) => sign::execute(&m).await?,
+        Commands::ImportCredential(m) => import_credential::execute(m).await?,
+        Commands::ListGateways(args) => list_gateways::execute(args).await?,
+        Commands::AddGateway(args) => add_gateway::execute(args).await?,
+        Commands::SwitchGateway(args) => switch_gateway::execute(args).await?,
         Commands::BuildInfo(m) => build_info::execute(m),
         Commands::Completions(s) => s.generate(&mut Cli::command(), bin_name),
         Commands::GenerateFigSpec => fig_generate(&mut Cli::command(), bin_name),
@@ -137,102 +186,7 @@ pub(crate) async fn execute(args: Cli) -> Result<(), NetworkRequesterError> {
     Ok(())
 }
 
-fn persist_gateway_details(
-    config: &Config,
-    details: GatewayEndpointConfig,
-) -> Result<(), NetworkRequesterError> {
-    let details_store =
-        OnDiskGatewayDetails::new(&config.storage_paths.common_paths.gateway_details);
-    let keys_store = OnDiskKeys::new(config.storage_paths.common_paths.keys.clone());
-    let shared_keys = keys_store.ephemeral_load_gateway_keys().map_err(|source| {
-        NetworkRequesterError::ClientCoreError(ClientCoreError::KeyStoreError {
-            source: Box::new(source),
-        })
-    })?;
-    let persisted_details = PersistedGatewayDetails::new(details, &shared_keys);
-    details_store
-        .store_to_disk(&persisted_details)
-        .map_err(|source| {
-            NetworkRequesterError::ClientCoreError(ClientCoreError::GatewayDetailsStoreError {
-                source: Box::new(source),
-            })
-        })
-}
-
-fn try_upgrade_v1_1_13_config(id: &str) -> Result<bool, NetworkRequesterError> {
-    use nym_config::legacy_helpers::nym_config::MigrationNymConfig;
-
-    // explicitly load it as v1.1.13 (which is incompatible with the next step, i.e. 1.1.19)
-    let Ok(old_config) = OldConfigV1_1_13::load_from_file(id) else {
-        // if we failed to load it, there might have been nothing to upgrade
-        // or maybe it was an even older file. in either way. just ignore it and carry on with our day
-        return Ok(false);
-    };
-    info!("It seems the client is using <= v1.1.13 config template.");
-    info!("It is going to get updated to the current specification.");
-
-    let updated_step1: ConfigV1_1_20 = old_config.into();
-    let updated_step2: ConfigV1_1_20_2 = updated_step1.into();
-    let (updated, gateway_config) = updated_step2.upgrade();
-    persist_gateway_details(&updated, gateway_config)?;
-
-    updated.save_to_default_location()?;
-    Ok(true)
-}
-
-fn try_upgrade_v1_1_20_config(id: &str) -> Result<bool, NetworkRequesterError> {
-    use nym_config::legacy_helpers::nym_config::MigrationNymConfig;
-
-    // explicitly load it as v1.1.20 (which is incompatible with the current one, i.e. +1.1.21)
-    let Ok(old_config) = ConfigV1_1_20::load_from_file(id) else {
-        // if we failed to load it, there might have been nothing to upgrade
-        // or maybe it was an even older file. in either way. just ignore it and carry on with our day
-        return Ok(false);
-    };
-
-    info!("It seems the client is using <= v1.1.20 config template.");
-    info!("It is going to get updated to the current specification.");
-
-    let updated_step1: ConfigV1_1_20_2 = old_config.into();
-    let (updated, gateway_config) = updated_step1.upgrade();
-    persist_gateway_details(&updated, gateway_config)?;
-
-    updated.save_to_default_location()?;
-    Ok(true)
-}
-
-fn try_upgrade_v1_1_20_2_config(id: &str) -> Result<bool, NetworkRequesterError> {
-    // explicitly load it as v1.1.20_2 (which is incompatible with the current one, i.e. +1.1.21)
-    let Ok(old_config) = ConfigV1_1_20_2::read_from_default_path(id) else {
-        // if we failed to load it, there might have been nothing to upgrade
-        // or maybe it was an even older file. in either way. just ignore it and carry on with our day
-        return Ok(false);
-    };
-    info!("It seems the client is using <= v1.1.20_2 config template.");
-    info!("It is going to get updated to the current specification.");
-
-    let (updated, gateway_config) = old_config.upgrade();
-    persist_gateway_details(&updated, gateway_config)?;
-
-    updated.save_to_default_location()?;
-    Ok(true)
-}
-
-fn try_upgrade_config(id: &str) -> Result<(), NetworkRequesterError> {
-    if try_upgrade_v1_1_13_config(id)? {
-        return Ok(());
-    }
-    if try_upgrade_v1_1_20_config(id)? {
-        return Ok(());
-    }
-    if try_upgrade_v1_1_20_2_config(id)? {
-        return Ok(());
-    }
-
-    Ok(())
-}
-
-fn try_load_current_config(id: &str) -> Result<Config, NetworkRequesterError> {
+async fn try_load_current_config(id: &str) -> Result<Config, NetworkRequesterError> {
     // try to load the config as is
     if let Ok(cfg) = Config::read_from_default_path(id) {
         return if !cfg.validate() {
@@ -243,7 +197,7 @@ fn try_load_current_config(id: &str) -> Result<Config, NetworkRequesterError> {
     }
 
     // we couldn't load it - try upgrading it from older revisions
-    try_upgrade_config(id)?;
+    try_upgrade_config_by_id(id).await?;
 
     let config = match Config::read_from_default_path(id) {
         Ok(cfg) => cfg,
@@ -291,7 +245,6 @@ fn version_check(cfg: &Config) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn verify_cli() {

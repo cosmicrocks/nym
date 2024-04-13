@@ -1,17 +1,21 @@
 // Copyright 2022 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
-use std::future::Future;
-use std::{error::Error, time::Duration};
-
 use futures::{future::pending, FutureExt, SinkExt, StreamExt};
-use tokio::{
-    sync::{
-        mpsc,
-        watch::{self, error::SendError},
-    },
-    time::sleep,
+use log::{log, Level};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::{error::Error, time::Duration};
+use tokio::sync::{
+    mpsc,
+    watch::{self, error::SendError},
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::time::{sleep, timeout};
+
+#[cfg(target_arch = "wasm32")]
+use wasmtimer::tokio::{sleep, timeout};
 
 const DEFAULT_SHUTDOWN_TIMER_SECS: u64 = 5;
 
@@ -23,10 +27,18 @@ pub type SentStatus = Box<dyn Error + Send + Sync>;
 pub type StatusSender = futures::channel::mpsc::Sender<SentStatus>;
 pub type StatusReceiver = futures::channel::mpsc::Receiver<SentStatus>;
 
+fn try_recover_name(name: &Option<String>) -> String {
+    if let Some(name) = name {
+        name.clone()
+    } else {
+        "unknown".to_string()
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 enum TaskError {
-    #[error("Task halted unexpectedly")]
-    UnexpectedHalt,
+    #[error("Task '{}' halted unexpectedly", try_recover_name(.shutdown_name))]
+    UnexpectedHalt { shutdown_name: Option<String> },
 }
 
 // TODO: possibly we should create a `Status` trait instead of reusing `Error`
@@ -34,12 +46,17 @@ enum TaskError {
 pub enum TaskStatus {
     #[error("Ready")]
     Ready,
+    #[error("Ready and connected to gateway: {0}")]
+    ReadyWithGateway(String),
 }
 
 /// Listens to status and error messages from tasks, as well as notifying them to gracefully
 /// shutdown. Keeps track of if task stop unexpectedly, such as in a panic.
 #[derive(Debug)]
 pub struct TaskManager {
+    // optional name assigned to the task manager that all subscribed task clients will inherit
+    name: Option<String>,
+
     // These channels have the dual purpose of signalling it's time to shutdown, but also to keep
     // track of which tasks we are still waiting for.
     notify_tx: watch::Sender<()>,
@@ -72,6 +89,7 @@ impl Default for TaskManager {
         // there is a listener.
         let (task_status_tx, task_status_rx) = futures::channel::mpsc::channel(128);
         Self {
+            name: None,
             notify_tx,
             notify_rx: Some(notify_rx),
             shutdown_timer_secs: DEFAULT_SHUTDOWN_TIMER_SECS,
@@ -93,9 +111,15 @@ impl TaskManager {
         }
     }
 
+    #[must_use]
+    pub fn named<S: Into<String>>(mut self, name: S) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn catch_interrupt(mut self) -> Result<(), SentError> {
-        let res = crate::wait_for_signal_and_error(&mut self).await;
+    pub async fn catch_interrupt(&mut self) -> Result<(), SentError> {
+        let res = crate::wait_for_signal_and_error(self).await;
 
         log::info!("Sending shutdown");
         self.signal_shutdown().ok();
@@ -107,7 +131,7 @@ impl TaskManager {
     }
 
     pub fn subscribe(&self) -> TaskClient {
-        TaskClient::new(
+        let task_client = TaskClient::new(
             self.notify_rx
                 .as_ref()
                 .expect("Unable to subscribe to shutdown notifier that is already shutdown")
@@ -115,17 +139,38 @@ impl TaskManager {
             self.task_return_error_tx.clone(),
             self.task_drop_tx.clone(),
             self.task_status_tx.clone(),
-        )
+        );
+
+        if let Some(name) = &self.name {
+            task_client.named(format!("{name}-child"))
+        } else {
+            task_client
+        }
+    }
+
+    pub fn subscribe_named<S: Into<String>>(&self, suffix: S) -> TaskClient {
+        let task_client = self.subscribe();
+        let suffix = suffix.into();
+        let child_name = if let Some(base) = &self.name {
+            format!("{base}-{suffix}")
+        } else {
+            format!("unknown-{suffix}")
+        };
+        task_client.named(child_name)
     }
 
     pub fn signal_shutdown(&self) -> Result<(), SendError<()>> {
         self.notify_tx.send(())
     }
 
-    pub async fn start_status_listener(&mut self, mut sender: StatusSender) {
+    pub async fn start_status_listener(
+        &mut self,
+        mut sender: StatusSender,
+        start_status: TaskStatus,
+    ) {
         // Announce that we are operational. This means that in the application where this is used,
         // everything is up and running and ready to go.
-        if let Err(msg) = sender.send(Box::new(TaskStatus::Ready)).await {
+        if let Err(msg) = sender.send(Box::new(start_status)).await {
             log::error!("Error sending status message: {}", msg);
         };
 
@@ -134,9 +179,9 @@ impl TaskManager {
             crate::spawn::spawn(async move {
                 loop {
                     if let Some(msg) = task_status_rx.next().await {
-                        log::trace!("Got msg: {}", msg);
+                        log::trace!("Got msg: {msg}");
                         if let Err(msg) = sender.send(msg).await {
-                            log::error!("Error sending status message: {}", msg);
+                            log::error!("Error sending status message: {msg}");
                         }
                     } else {
                         log::trace!("Stopping since channel closed");
@@ -180,16 +225,10 @@ impl TaskManager {
         #[cfg(not(target_arch = "wasm32"))]
         let interrupt_future = tokio::signal::ctrl_c();
 
-        // in wasm we'll never get our shutdown anyway...
         #[cfg(target_arch = "wasm32")]
         let interrupt_future = futures::future::pending::<()>();
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let wait_future = tokio::time::sleep(Duration::from_secs(self.shutdown_timer_secs));
-
-        // TODO: we should be using a `Delay` here for wasm
-        #[cfg(target_arch = "wasm32")]
-        let wait_future = futures::future::pending::<()>();
+        let wait_future = sleep(Duration::from_secs(self.shutdown_timer_secs));
 
         tokio::select! {
             _ = self.notify_tx.closed() => {
@@ -207,10 +246,16 @@ impl TaskManager {
 
 /// Listen for shutdown notifications, and can send error and status messages back to the
 /// `TaskManager`
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TaskClient {
+    // optional name assigned to the shutdown handle
+    name: Option<String>,
+
     // If a shutdown notification has been registered
-    shutdown: bool,
+    // the reason for having an atomic here is to be able to cheat and modify that value whilst
+    // holding an immutable reference to the `TaskClient`.
+    // note: using `Relaxed` ordering everywhere is fine since it's not shared between threads
+    shutdown: AtomicBool,
 
     // Listen for shutdown notifications, as well as a mechanism to report back that we have
     // finished (the receiver is closed).
@@ -229,8 +274,35 @@ pub struct TaskClient {
     mode: ClientOperatingMode,
 }
 
+impl Clone for TaskClient {
+    fn clone(&self) -> Self {
+        // make sure to not accidentally overflow the stack if we keep cloning the handle
+        let name = if let Some(name) = &self.name {
+            if name != Self::OVERFLOW_NAME && name.len() < Self::MAX_NAME_LENGTH {
+                Some(format!("{name}-child"))
+            } else {
+                Some(Self::OVERFLOW_NAME.to_string())
+            }
+        } else {
+            None
+        };
+
+        TaskClient {
+            name,
+            shutdown: AtomicBool::new(self.shutdown.load(Ordering::Relaxed)),
+            notify: self.notify.clone(),
+            return_error: self.return_error.clone(),
+            drop_error: self.drop_error.clone(),
+            status_msg: self.status_msg.clone(),
+            mode: self.mode.clone(),
+        }
+    }
+}
+
 impl TaskClient {
-    #[cfg(not(target_arch = "wasm32"))]
+    const MAX_NAME_LENGTH: usize = 128;
+    const OVERFLOW_NAME: &'static str = "reached maximum TaskClient children name depth";
+
     const SHUTDOWN_TIMEOUT_WAITING_FOR_SIGNAL_ON_EXIT: Duration = Duration::from_secs(5);
 
     fn new(
@@ -240,13 +312,60 @@ impl TaskClient {
         status_msg: StatusSender,
     ) -> TaskClient {
         TaskClient {
-            shutdown: false,
+            name: None,
+            shutdown: AtomicBool::new(false),
             notify,
             return_error,
             drop_error,
             status_msg,
             mode: ClientOperatingMode::Listening,
         }
+    }
+
+    // TODO: not convinced about the name...
+    pub fn fork<S: Into<String>>(&self, child_suffix: S) -> Self {
+        let mut child = self.clone();
+        let suffix = child_suffix.into();
+        let child_name = if let Some(base) = &self.name {
+            format!("{base}-{suffix}")
+        } else {
+            format!("unknown-{suffix}")
+        };
+
+        child.name = Some(child_name);
+        child
+    }
+
+    // just a convenience wrapper for including the shutdown name when logging
+    // I really didn't want to create macros for that... because that seemed like an overkill.
+    // but I guess it would have resolved needing to call `format!` for additional msg arguments
+    fn log<S: Into<String>>(&self, level: Level, msg: S) {
+        let msg = msg.into();
+
+        let target = &if let Some(name) = &self.name {
+            format!("TaskClient-{name}")
+        } else {
+            "unnamed-TaskClient".to_string()
+        };
+
+        log!(target: target, level, "{}", format!("[{target}] {msg}"))
+    }
+
+    #[must_use]
+    pub fn named<S: Into<String>>(mut self, name: S) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_suffix<S: Into<String>>(self, suffix: S) -> Self {
+        let suffix = suffix.into();
+        let name = if let Some(base) = &self.name {
+            format!("{base}-{suffix}")
+        } else {
+            format!("unknown-{suffix}")
+        };
+        self.named(name)
     }
 
     pub async fn run_future<Fut, T>(&mut self, fut: Fut) -> Option<T>
@@ -267,7 +386,8 @@ impl TaskClient {
         let (task_drop_tx, _task_drop_rx) = mpsc::unbounded_channel();
         let (task_status_tx, _task_status_rx) = futures::channel::mpsc::channel(128);
         TaskClient {
-            shutdown: false,
+            name: None,
+            shutdown: AtomicBool::new(false),
             notify: notify_rx,
             return_error: task_halt_tx,
             drop_error: task_drop_tx,
@@ -284,7 +404,7 @@ impl TaskClient {
         if self.mode.is_dummy() {
             false
         } else {
-            self.shutdown
+            self.shutdown.load(Ordering::Relaxed)
         }
     }
 
@@ -292,11 +412,11 @@ impl TaskClient {
         if self.mode.is_dummy() {
             return pending().await;
         }
-        if self.shutdown {
+        if self.shutdown.load(Ordering::Relaxed) {
             return;
         }
         let _ = self.notify.changed().await;
-        self.shutdown = true;
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 
     pub async fn recv_with_delay(&mut self) {
@@ -312,32 +432,36 @@ impl TaskClient {
         if self.mode.is_dummy() {
             return pending().await;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        tokio::time::timeout(
+
+        if let Err(timeout) = timeout(
             Self::SHUTDOWN_TIMEOUT_WAITING_FOR_SIGNAL_ON_EXIT,
             self.recv(),
         )
         .await
-        .expect("Task stopped without shutdown called");
+        {
+            self.log(Level::Error, "Task stopped without shutdown called");
+            panic!("{:?}: {timeout}", self.name)
+        }
     }
 
-    pub fn is_shutdown_poll(&mut self) -> bool {
+    pub fn is_shutdown_poll(&self) -> bool {
         if self.mode.is_dummy() {
             return false;
         }
-        if self.shutdown {
+        if self.shutdown.load(Ordering::Relaxed) {
             return true;
         }
         match self.notify.has_changed() {
             Ok(has_changed) => {
                 if has_changed {
-                    self.shutdown = true;
+                    self.shutdown.store(true, Ordering::Relaxed);
                 }
                 has_changed
             }
             Err(err) => {
-                log::error!("Polling shutdown failed: {err}");
-                log::error!("Assuming this means we should shutdown...");
+                self.log(Level::Error, format!("Polling shutdown failed: {err}"));
+                self.log(Level::Error, "Assuming this means we should shutdown...");
+
                 true
             }
         }
@@ -350,13 +474,19 @@ impl TaskClient {
         self.mode.set_should_not_signal_on_drop();
     }
 
+    pub fn disarm(&mut self) {
+        self.mark_as_success();
+    }
+
     pub fn send_we_stopped(&mut self, err: SentError) {
         if self.mode.is_dummy() {
             return;
         }
-        log::trace!("Notifying we stopped: {err}");
+
+        self.log(Level::Trace, format!("Notifying we stopped: {err}"));
+
         if self.return_error.send(err).is_err() {
-            log::error!("Failed to send back error message");
+            self.log(Level::Error, "failed to send back error message");
         }
     }
 
@@ -373,13 +503,26 @@ impl TaskClient {
 impl Drop for TaskClient {
     fn drop(&mut self) {
         if !self.mode.should_signal_on_drop() {
+            self.log(
+                Level::Trace,
+                "the task client is getting dropped but inststructed to not signal: this is expected during client shutdown",
+            );
             return;
+        } else {
+            self.log(
+                Level::Debug,
+                "the task client is getting dropped: this is expected during client shutdown",
+            );
         }
+
         if !self.is_shutdown_poll() {
-            log::trace!("Notifying stop on unexpected drop");
+            self.log(Level::Trace, "Notifying stop on unexpected drop");
+
             // If we can't send, well then there is not much to do
             self.drop_error
-                .send(Box::new(TaskError::UnexpectedHalt))
+                .send(Box::new(TaskError::UnexpectedHalt {
+                    shutdown_name: self.name.clone(),
+                }))
                 .ok();
         }
     }
@@ -413,6 +556,95 @@ impl ClientOperatingMode {
             ListeningButDontReportHalt | Listening => ListeningButDontReportHalt,
             Dummy => Dummy,
         };
+    }
+}
+
+#[derive(Debug)]
+pub enum TaskHandle {
+    /// Full [`TaskManager`] that was created by the underlying task.
+    Internal(TaskManager),
+
+    /// `[TaskClient]` that was passed from an external task, that controls the shutdown process.
+    External(TaskClient),
+}
+
+impl From<TaskManager> for TaskHandle {
+    fn from(value: TaskManager) -> Self {
+        TaskHandle::Internal(value)
+    }
+}
+
+impl From<TaskClient> for TaskHandle {
+    fn from(value: TaskClient) -> Self {
+        TaskHandle::External(value)
+    }
+}
+
+impl Default for TaskHandle {
+    fn default() -> Self {
+        TaskHandle::Internal(TaskManager::default())
+    }
+}
+
+impl TaskHandle {
+    #[must_use]
+    pub fn name_if_unnamed<S: Into<String>>(self, name: S) -> Self {
+        match self {
+            TaskHandle::Internal(task_manager) => {
+                if task_manager.name.is_none() {
+                    TaskHandle::Internal(task_manager.named(name))
+                } else {
+                    TaskHandle::Internal(task_manager)
+                }
+            }
+            TaskHandle::External(task_client) => {
+                if task_client.name.is_none() {
+                    TaskHandle::External(task_client.named(name))
+                } else {
+                    TaskHandle::External(task_client)
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn named<S: Into<String>>(self, name: S) -> Self {
+        match self {
+            TaskHandle::Internal(task_manager) => TaskHandle::Internal(task_manager.named(name)),
+            TaskHandle::External(task_client) => TaskHandle::External(task_client.named(name)),
+        }
+    }
+
+    pub fn fork<S: Into<String>>(&self, child_suffix: S) -> TaskClient {
+        match self {
+            TaskHandle::External(shutdown) => shutdown.fork(child_suffix),
+            TaskHandle::Internal(shutdown) => shutdown.subscribe_named(child_suffix),
+        }
+    }
+
+    pub fn get_handle(&self) -> TaskClient {
+        match self {
+            TaskHandle::External(shutdown) => shutdown.clone(),
+            TaskHandle::Internal(shutdown) => shutdown.subscribe(),
+        }
+    }
+
+    pub fn try_into_task_manager(self) -> Option<TaskManager> {
+        match self {
+            TaskHandle::External(_) => None,
+            TaskHandle::Internal(shutdown) => Some(shutdown),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn wait_for_shutdown(self) -> Result<(), SentError> {
+        match self {
+            TaskHandle::Internal(mut task_manager) => task_manager.catch_interrupt().await,
+            TaskHandle::External(mut task_client) => {
+                task_client.recv().await;
+                Ok(())
+            }
+        }
     }
 }
 

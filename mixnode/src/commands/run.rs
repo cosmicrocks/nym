@@ -1,13 +1,12 @@
 // Copyright 2020 - Nym Technologies SA <contact@nymtech.net>
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 use super::OverrideConfig;
-use crate::commands::{override_config, try_load_current_config, version_check};
-use crate::node::MixNode;
-use anyhow::bail;
+use crate::commands::{override_config, try_load_current_config};
 use clap::Args;
 use nym_bin_common::output_format::OutputFormat;
 use nym_config::helpers::SPECIAL_ADDRESSES;
+use nym_mixnode::MixNode;
 use nym_validator_client::nyxd;
 use std::net::IpAddr;
 
@@ -44,6 +43,9 @@ pub(crate) struct Run {
 
     #[clap(short, long, default_value_t = OutputFormat::default())]
     output: OutputFormat,
+
+    #[clap(long)]
+    metrics_key: Option<String>,
 }
 
 impl From<Run> for OverrideConfig {
@@ -55,6 +57,7 @@ impl From<Run> for OverrideConfig {
             verloc_port: run_config.verloc_port,
             http_api_port: run_config.http_api_port,
             nym_apis: run_config.nym_apis,
+            metrics_key: run_config.metrics_key,
         }
     }
 }
@@ -75,22 +78,17 @@ pub(crate) async fn execute(args: &Run) -> anyhow::Result<()> {
     let mut config = try_load_current_config(&args.id)?;
     config = override_config(config, OverrideConfig::from(args.clone()));
 
-    if !version_check(&config) {
-        error!("failed the local version check");
-        bail!("failed the local version check")
-    }
-
     if SPECIAL_ADDRESSES.contains(&config.mixnode.listening_address) {
         show_binding_warning(&config.mixnode.listening_address.to_string());
     }
 
-    let mut mixnode = MixNode::new(config);
+    let mut mixnode = MixNode::new(config)?;
 
     eprintln!(
         "\nTo bond your mixnode you will need to install the Nym wallet, go to https://nymtech.net/get-involved and select the Download button.\n\
          Select the correct version and install it to your machine. You will need to provide the following: \n ");
     mixnode.print_node_details(args.output);
 
-    mixnode.run().await;
+    mixnode.run().await?;
     Ok(())
 }

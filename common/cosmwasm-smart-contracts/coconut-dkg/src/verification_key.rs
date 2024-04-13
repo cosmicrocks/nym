@@ -3,14 +3,14 @@
 
 use crate::msg::ExecuteMsg;
 use crate::types::{EpochId, NodeIndex};
+use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{from_binary, to_binary, Addr, CosmosMsg, StdResult, Timestamp, WasmMsg};
 use cw_utils::Expiration;
 use nym_multisig_contract_common::msg::ExecuteMsg as MultisigExecuteMsg;
-use serde::{Deserialize, Serialize};
 
 pub type VerificationKeyShare = String;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cw_serde]
 pub struct ContractVKShare {
     pub share: VerificationKeyShare,
     pub announce_address: String,
@@ -20,11 +20,19 @@ pub struct ContractVKShare {
     pub verified: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
+pub struct VkShareResponse {
+    pub owner: Addr,
+    pub epoch_id: EpochId,
+    pub share: Option<ContractVKShare>,
+}
+
+#[cw_serde]
 pub struct PagedVKSharesResponse {
     pub shares: Vec<ContractVKShare>,
     pub per_page: usize,
+
+    /// Field indicating paging information for the following queries if the caller wishes to get further entries.
     pub start_next_after: Option<Addr>,
 }
 
@@ -35,7 +43,10 @@ pub fn to_cosmos_msg(
     multisig_addr: String,
     expiration_time: Timestamp,
 ) -> StdResult<CosmosMsg> {
-    let verify_vk_share_req = ExecuteMsg::VerifyVerificationKeyShare { owner, resharing };
+    let verify_vk_share_req = ExecuteMsg::VerifyVerificationKeyShare {
+        owner: owner.to_string(),
+        resharing,
+    };
     let verify_vk_share_msg = CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: coconut_dkg_addr,
         msg: to_binary(&verify_vk_share_req)?,
@@ -56,12 +67,19 @@ pub fn to_cosmos_msg(
     Ok(msg)
 }
 
-pub fn owner_from_cosmos_msgs(msgs: &[CosmosMsg]) -> Option<Addr> {
+// DKG SAFETY:
+// each legit verification proposal will only contain a single execute msg,
+// if they have more than one, we can safely ignore it
+pub fn owner_from_cosmos_msgs(msgs: &[CosmosMsg]) -> Option<String> {
+    if msgs.len() != 1 {
+        return None;
+    }
+
     if let Some(CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: _,
         msg,
         funds: _,
-    })) = msgs.get(0)
+    })) = msgs.first()
     {
         if let Ok(ExecuteMsg::VerifyVerificationKeyShare { owner, .. }) =
             from_binary::<ExecuteMsg>(msg)

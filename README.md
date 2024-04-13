@@ -15,7 +15,6 @@ The platform is composed of multiple Rust crates. Top-level executable binary cr
 * nym-explorer - a (projected) block explorer and (existing) mixnet viewer.
 * nym-wallet - a desktop wallet implemented using the [Tauri](https://tauri.studio/en/docs/about/intro) framework.
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge)](https://opensource.org/licenses/Apache-2.0)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/nymtech/nym/build.yml?branch=develop&style=for-the-badge&logo=github-actions)](https://github.com/nymtech/nym/actions?query=branch%3Adevelop)
 
 
@@ -50,10 +49,10 @@ Node, node operator and delegator rewards are determined according to the princi
 |<img src="https://render.githubusercontent.com/render/math?math=\lambda_{i}#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}\lambda_{i}#gh-dark-mode-only">|ratio of stake operator has pledged to their node to the token circulating supply.
 |<img src="https://render.githubusercontent.com/render/math?math=\omega_{i}#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}\omega_{i}#gh-dark-mode-only">|fraction of total effort undertaken by node `i`, set to `1/k`.
 |<img src="https://render.githubusercontent.com/render/math?math=k#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}k#gh-dark-mode-only">|number of nodes stakeholders are incentivised to create, set by the validators, a matter of governance. Currently determined by the `reward set` size, and set to 720 in testnet Sandbox.
-|<img src="https://render.githubusercontent.com/render/math?math=\alpha#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}\alpha#gh-dark-mode-only">|Sybil attack resistance parameter - the higher this parameter is set the stronger the reduction in competitiveness gets for a Sybil attacker.
-|<img src="https://render.githubusercontent.com/render/math?math=PM_{i}#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}PM_{i}#gh-dark-mode-only">|declared profit margin of operator `i`, defaults to 10% in.
+|<img src="https://render.githubusercontent.com/render/math?math=\alpha#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}\alpha#gh-dark-mode-only">|A Sybil attack resistance parameter - the higher this parameter is set, the stronger the reduction in competitiveness for a Sybil attacker.
+|<img src="https://render.githubusercontent.com/render/math?math=PM_{i}#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}PM_{i}#gh-dark-mode-only">|declared profit margin of operator `i`, defaults to 10%.
 |<img src="https://render.githubusercontent.com/render/math?math=PF_{i}#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}PF_{i}#gh-dark-mode-only">|uptime of node `i`, scaled to 0 - 1, for the rewarding epoch
-|<img src="https://render.githubusercontent.com/render/math?math=PP_{i}#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}PP_{i}#gh-dark-mode-only">|cost of operating node `i` for the duration of the rewarding epoch, set to 40 NYMT.
+|<img src="https://render.githubusercontent.com/render/math?math=PP_{i}#gh-light-mode-only"><img src="https://render.githubusercontent.com/render/math?math=\color{white}PP_{i}#gh-dark-mode-only">|cost of operating node `i` for the duration of the rewarding epoch, set to 40 NYMs.
 
 Node reward for node `i` is determined as:
 
@@ -83,4 +82,11 @@ where `s'` is stake `s` scaled over total token circulating supply.
 
 ### Licensing and copyright information
 
-This program is available as open source under the terms of the Apache 2.0 license. However, some elements are being licensed under CC0-1.0 and MIT. For accurate information, please check individual files.
+This is a monorepo and components that make up Nym as a system are licensed individually, so for accurate information, please check individual files.
+
+As a general approach, licensing is as follows this pattern:
+- applications and binaries are GPLv3
+- libraries and components are Apache 2.0 or MIT
+- documentation is Apache 2.0 or CC0-1.0
+
+Again, for accurate information, please check individual files.

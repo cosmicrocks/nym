@@ -7,9 +7,12 @@ use nym_config::OptionalSet;
 use nym_sphinx::addressing::clients::Recipient;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
 pub mod old_config_v1_1_20_2;
+pub mod old_config_v1_1_30;
+pub mod old_config_v1_1_33;
 
 pub use nym_service_providers_common::interface::ProviderInterfaceVersion;
 pub use nym_socks5_requests::Socks5ProtocolVersion;
@@ -43,8 +46,15 @@ impl Config {
         self.base.validate()
     }
 
+    #[must_use]
     pub fn with_port(mut self, port: u16) -> Self {
-        self.socks5.listening_port = port;
+        self.socks5.bind_address = SocketAddr::new(self.socks5.bind_address.ip(), port);
+        self
+    }
+
+    #[must_use]
+    pub fn with_ip(mut self, ip: IpAddr) -> Self {
+        self.socks5.bind_address = SocketAddr::new(ip, self.socks5.bind_address.port());
         self
     }
 
@@ -101,8 +111,9 @@ impl Config {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Socks5 {
-    /// The port on which the client will be listening for incoming requests
-    pub listening_port: u16,
+    /// The address on which the client will be listening for incoming requests
+    /// (default: 127.0.0.1:1080)
+    pub bind_address: SocketAddr,
 
     /// The mix address of the provider to which all requests are going to be sent.
     pub provider_mix_address: String,
@@ -110,10 +121,10 @@ pub struct Socks5 {
     /// The version of the 'service provider' this client is going to use in its communication with the
     /// specified socks5 provider.
     // if in doubt, use the legacy version as initially nobody will be using the updated binaries
-    #[serde(default = "ProviderInterfaceVersion::new_legacy")]
+    #[serde(default)]
     pub provider_interface_version: ProviderInterfaceVersion,
 
-    #[serde(default = "Socks5ProtocolVersion::new_legacy")]
+    #[serde(default)]
     pub socks5_protocol_version: Socks5ProtocolVersion,
 
     /// Specifies whether this client is going to use an anonymous sender tag for communication with the service provider.
@@ -131,7 +142,10 @@ pub struct Socks5 {
 impl Socks5 {
     pub fn new<S: Into<String>>(provider_mix_address: S) -> Self {
         Socks5 {
-            listening_port: DEFAULT_SOCKS5_LISTENING_PORT,
+            bind_address: SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                DEFAULT_SOCKS5_LISTENING_PORT,
+            ),
             provider_mix_address: provider_mix_address.into(),
             provider_interface_version: ProviderInterfaceVersion::Legacy,
             socks5_protocol_version: Socks5ProtocolVersion::Legacy,
@@ -147,7 +161,7 @@ impl Socks5 {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Socks5Debug {
     /// Number of reply SURBs attached to each `Request::Connect` message.
     pub connection_start_surbs: u32,

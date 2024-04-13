@@ -3,7 +3,9 @@
 
 // use nym_client::client::config::{BaseClientConfig, Config, GatewayEndpointConfig};
 // use nym_client::client::{DirectClient, KeyManager, Recipient, ReconstructedMessage, SocketClient};
-use nym_sdk::mixnet::{IncludedSurbs, MixnetClient, Recipient, ReconstructedMessage};
+use nym_sdk::mixnet::{
+    IncludedSurbs, MixnetClient, MixnetMessageSender, Recipient, ReconstructedMessage,
+};
 use nym_service_providers_common::interface::{
     ControlRequest, ControlResponse, ProviderInterfaceVersion, Request, Response, ResponseContent,
 };
@@ -34,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     // but I needed an easy way of sending to and receiving from the mixnet
     // and that was the most straightforward way of achieving it
     let mut client = MixnetClient::connect_new().await.unwrap();
-    let provider: Recipient = "AN8eLxYWFitCkMn92zim3PrPszxJZDYyFFKP7qnnAAew.8UAxL3LwQBis6WpM3GGXaqKGaVdnLCpGJWumHT6KNdTH@77TSuVU8d1oXKbPzjec2xh4i3Wj5WwUyy9Lr36sm8gZm".parse().unwrap();
+    let provider: Recipient = "8YF6f8x17j3fviBdU87EGD9g9MAgn9DARxunwLEVM7Bm.4ydfpjbTjCmzj58hWdQjxU2gT6CRVnTbnKajr2hAGBBM@2xU4CBE6QiiYt6EyBXSALwxkNvM7gqJfjHXaMkjiFmYW".parse().unwrap();
 
     // generic service provider request, so we don't even need to care it's to the socks5 provider
     let request_health = ControlRequest::Health;
@@ -51,34 +53,34 @@ async fn main() -> anyhow::Result<()> {
     // TODO: currently we HAVE TO use surbs unfortunately
     println!("Sending 'Health' request...");
     client
-        .send_bytes(
+        .send_message(
             provider,
             full_request_health.into_bytes(),
             IncludedSurbs::new(10),
         )
-        .await;
+        .await?;
     let response = wait_for_control_response(&mut client).await;
     println!("response to 'Health' request: {response:#?}");
 
     println!("Sending 'BinaryInfo' request...");
     client
-        .send_bytes(
+        .send_message(
             provider,
             full_request_binary_info.into_bytes(),
             IncludedSurbs::none(),
         )
-        .await;
+        .await?;
     let response = wait_for_control_response(&mut client).await;
     println!("response to 'BinaryInfo' request: {response:#?}");
 
     println!("Sending 'SupportedRequestVersions' request...");
     client
-        .send_bytes(
+        .send_message(
             provider,
             full_request_versions.into_bytes(),
             IncludedSurbs::none(),
         )
-        .await;
+        .await?;
     let response = wait_for_control_response(&mut client).await;
     println!("response to 'SupportedRequestVersions' request: {response:#?}");
 

@@ -1,8 +1,6 @@
 # Community Applications
 
-We love seeing our developer community create applications using Nym. If you would like to share your application with the community, please submit a pull request to the `main` branch of the `nymtech/dev-portal` [repository](https://github.com/nymtech/dev-portal).
-
-
+If you would like to share your application here, please submit a pull request to the `main` branch of the `nymtech/dev-portal` [repository](https://github.com/nymtech/dev-portal).
 
 ## <img src='../images/profile_picture/pastenym_ntv_pp.png' style="float: right; width: 75px; height: 75px;">Pastenym
 
@@ -87,9 +85,17 @@ We love seeing our developer community create applications using Nym. If you wou
 
 ## <img src='../images/profile_picture/minibolt_pp.png' style="float: right; width: 75px; height: 75px;">Minibolt
 
-> Anonymize your p2p inventory messages and mempool for your Bitcoin & Lightning full nodes on consumer PCs!
+> Proxies the clearnet connections of a Bitcoin node and its associated tools using the NYM mixnet.
 * [Github](https://github.com/minibolt-guide/minibolt)
 * [Documentation](https://v2.minibolt.info/bonus-guides/system/nym-mixnet#proxying-bitcoin-core)
+
+
+
+## <img src='../images/profile_picture/nymgraph_pp.png' style="float: right; width: 75px; height: 75px;">NymGraph
+
+> NymGraph is a graphical chat client for Nym running on Ubuntu and Debian. Test it to chat over the Nym network!
+* [Github](https://github.com/Tyz3/nymgraph)
+
 
 
 

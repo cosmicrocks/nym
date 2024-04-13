@@ -9,8 +9,11 @@ use nym_mixnet_contract_common::rewarding::RewardEstimate;
 use nym_mixnet_contract_common::{
     GatewayBond, IdentityKey, Interval, MixId, MixNode, Percent, RewardedSetNodeStatus,
 };
+use nym_node_requests::api::v1::node::models::BinaryBuildInformationOwned;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter};
+use std::net::IpAddr;
 use std::{fmt, time::Duration};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -27,6 +30,12 @@ impl RequestError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+}
+
+impl Display for RequestError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.message.fmt(f)
     }
 }
 
@@ -135,6 +144,10 @@ impl MixNodeBondAnnotated {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GatewayBondAnnotated {
     pub gateway_bond: GatewayBond,
+
+    #[serde(default)]
+    pub self_described: Option<GatewayDescription>,
+
     // NOTE: the performance field is deprecated in favour of node_performance
     pub performance: Performance,
     pub node_performance: NodePerformance,
@@ -149,6 +162,11 @@ impl GatewayBondAnnotated {
     pub fn owner(&self) -> &Addr {
         self.gateway_bond.owner()
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GatewayDescription {
+    // for now only expose what we need. this struct will evolve in the future (or be incorporated into nym-node properly)
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -336,4 +354,137 @@ pub struct CirculatingSupplyResponse {
     pub mixmining_reserve: Coin,
     pub vesting_tokens: Coin,
     pub circulating_supply: Coin,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostInformation {
+    pub ip_address: Vec<IpAddr>,
+    pub hostname: Option<String>,
+    pub keys: HostKeys,
+}
+
+impl From<nym_node_requests::api::v1::node::models::HostInformation> for HostInformation {
+    fn from(value: nym_node_requests::api::v1::node::models::HostInformation) -> Self {
+        HostInformation {
+            ip_address: value.ip_address,
+            hostname: value.hostname,
+            keys: value.keys.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostKeys {
+    pub ed25519: String,
+    pub x25519: String,
+}
+
+impl From<nym_node_requests::api::v1::node::models::HostKeys> for HostKeys {
+    fn from(value: nym_node_requests::api::v1::node::models::HostKeys) -> Self {
+        HostKeys {
+            ed25519: value.ed25519_identity,
+            x25519: value.x25519_sphinx,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WebSockets {
+    pub ws_port: u16,
+
+    pub wss_port: Option<u16>,
+}
+
+impl From<nym_node_requests::api::v1::gateway::models::WebSockets> for WebSockets {
+    fn from(value: nym_node_requests::api::v1::gateway::models::WebSockets) -> Self {
+        WebSockets {
+            ws_port: value.ws_port,
+            wss_port: value.wss_port,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NymNodeDescription {
+    pub host_information: HostInformation,
+
+    // TODO: do we really care about ALL build info or just the version?
+    pub build_information: BinaryBuildInformationOwned,
+
+    #[serde(default)]
+    pub network_requester: Option<NetworkRequesterDetails>,
+
+    #[serde(default)]
+    pub ip_packet_router: Option<IpPacketRouterDetails>,
+
+    // for now we only care about their ws/wss situation, nothing more
+    pub mixnet_websockets: WebSockets,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DescribedGateway {
+    pub bond: GatewayBond,
+    pub self_described: Option<NymNodeDescription>,
+}
+
+impl From<GatewayBond> for DescribedGateway {
+    fn from(bond: GatewayBond) -> Self {
+        DescribedGateway {
+            bond,
+            self_described: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NetworkRequesterDetails {
+    /// address of the embedded network requester
+    pub address: String,
+
+    /// flag indicating whether this network requester uses the exit policy rather than the deprecated allow list
+    pub uses_exit_policy: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IpPacketRouterDetails {
+    /// address of the embedded ip packet router
+    pub address: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ApiHealthResponse {
+    pub status: ApiStatus,
+    pub uptime: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiStatus {
+    Up,
+}
+
+impl ApiHealthResponse {
+    pub fn new_healthy(uptime: Duration) -> Self {
+        ApiHealthResponse {
+            status: ApiStatus::Up,
+            uptime: uptime.as_secs(),
+        }
+    }
+}
+
+impl ApiStatus {
+    pub fn is_up(&self) -> bool {
+        matches!(self, ApiStatus::Up)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SignerInformationResponse {
+    pub cosmos_address: String,
+
+    pub identity: String,
+
+    pub announce_address: String,
+
+    pub verification_key: Option<String>,
 }

@@ -1,8 +1,6 @@
-use nym_client_core::client::base_client::storage::gateway_details::{
-    GatewayDetailsStore, PersistedGatewayDetails,
-};
 use nym_sdk::mixnet::{
-    self, EmptyReplyStorage, EphemeralCredentialStorage, KeyManager, KeyStore, MixnetClientStorage,
+    self, ActiveGateway, BadGateway, ClientKeys, EmptyReplyStorage, EphemeralCredentialStorage,
+    GatewayRegistration, GatewaysDetailsStore, KeyStore, MixnetClientStorage, MixnetMessageSender,
 };
 use nym_topology::provider_trait::async_trait;
 
@@ -15,7 +13,6 @@ async fn main() {
     let mock_storage = MockClientStorage::empty();
     let mut client = mixnet::MixnetClientBuilder::new_with_storage(mock_storage)
         .build()
-        .await
         .unwrap()
         .connect_to_mixnet()
         .await
@@ -26,7 +23,10 @@ async fn main() {
     println!("Our client nym address is: {our_address}");
 
     // Send important info up the pipe to a buddy
-    client.send_str(*our_address, "hello there").await;
+    client
+        .send_plain_message(*our_address, "hello there")
+        .await
+        .unwrap();
 
     println!("Waiting for message");
     if let Some(received) = client.wait_for_messages().await {
@@ -61,7 +61,7 @@ impl MixnetClientStorage for MockClientStorage {
     type KeyStore = MockKeyStore;
     type ReplyStore = EmptyReplyStorage;
     type CredentialStore = EphemeralCredentialStorage;
-    type GatewayDetailsStore = MockGatewayDetailsStore;
+    type GatewaysDetailsStore = MockGatewayDetailsStore;
 
     fn into_runtime_stores(self) -> (Self::ReplyStore, Self::CredentialStore) {
         (self.reply_store, self.credential_store)
@@ -79,7 +79,7 @@ impl MixnetClientStorage for MockClientStorage {
         &self.credential_store
     }
 
-    fn gateway_details_store(&self) -> &Self::GatewayDetailsStore {
+    fn gateway_details_store(&self) -> &Self::GatewaysDetailsStore {
         &self.gateway_details_store
     }
 }
@@ -90,13 +90,13 @@ struct MockKeyStore;
 impl KeyStore for MockKeyStore {
     type StorageError = MyError;
 
-    async fn load_keys(&self) -> Result<KeyManager, Self::StorageError> {
+    async fn load_keys(&self) -> Result<ClientKeys, Self::StorageError> {
         println!("loading stored keys");
 
         Err(MyError)
     }
 
-    async fn store_keys(&self, _keys: &KeyManager) -> Result<(), Self::StorageError> {
+    async fn store_keys(&self, _keys: &ClientKeys) -> Result<(), Self::StorageError> {
         println!("storing keys");
 
         Ok(())
@@ -106,20 +106,53 @@ impl KeyStore for MockKeyStore {
 struct MockGatewayDetailsStore;
 
 #[async_trait]
-impl GatewayDetailsStore for MockGatewayDetailsStore {
+impl GatewaysDetailsStore for MockGatewayDetailsStore {
     type StorageError = MyError;
 
-    async fn load_gateway_details(&self) -> Result<PersistedGatewayDetails, Self::StorageError> {
-        println!("loading stored gateway details");
+    async fn active_gateway(&self) -> Result<ActiveGateway, Self::StorageError> {
+        println!("getting active gateway");
+
+        Err(MyError)
+    }
+
+    async fn set_active_gateway(&self, _gateway_id: &str) -> Result<(), Self::StorageError> {
+        println!("setting active gateway");
+
+        Ok(())
+    }
+
+    async fn all_gateways(&self) -> Result<Vec<GatewayRegistration>, Self::StorageError> {
+        println!("getting all registered gateways");
+
+        Err(MyError)
+    }
+
+    async fn has_gateway_details(&self, _gateway_id: &str) -> Result<bool, Self::StorageError> {
+        println!("checking for gateway details");
+
+        Err(MyError)
+    }
+
+    async fn load_gateway_details(
+        &self,
+        _gateway_id: &str,
+    ) -> Result<GatewayRegistration, Self::StorageError> {
+        println!("loading gateway details");
 
         Err(MyError)
     }
 
     async fn store_gateway_details(
         &self,
-        _details: &PersistedGatewayDetails,
+        _details: &GatewayRegistration,
     ) -> Result<(), Self::StorageError> {
         println!("storing gateway details");
+
+        Ok(())
+    }
+
+    async fn remove_gateway_details(&self, _gateway_id: &str) -> Result<(), Self::StorageError> {
+        println!("removing gateway details");
 
         Ok(())
     }
@@ -178,3 +211,9 @@ impl GatewayDetailsStore for MockGatewayDetailsStore {
 #[derive(thiserror::Error, Debug)]
 #[error("foobar")]
 struct MyError;
+
+impl From<BadGateway> for MyError {
+    fn from(_: BadGateway) -> Self {
+        MyError
+    }
+}

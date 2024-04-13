@@ -1,5 +1,6 @@
 # Matrix NymConnect Integration
 
+![](../images//matrix.png)
 
 Chat applications became an essential part of human communication. Matrix chat has end to end encryption on protocol level and Element app users can sort their communication into spaces and rooms. Now the Matrix communities can rely on network privacy as NymConnect supports Matrix chat protocol.
 
@@ -12,8 +13,16 @@ Make sure you have installed and started **[NymConnect](https://nymtech.net/deve
 
 To then start Matrix's Element client via a Socks5 proxy connected to NymConnect, open terminal and run:
 
+**Linux**
+
 ```sh
 element-desktop --proxy-server=socks5://127.0.0.1:1080
+```
+
+**Mac**
+
+```sh
+open -a Element --args --proxy-server=socks5://127.0.0.1:1080
 ```
 
 ## Optimise setup with a keybinding / alias

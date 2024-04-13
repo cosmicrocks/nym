@@ -12,7 +12,7 @@ use nym_topology::{NymTopology, NymTopologyError};
 use rand::{CryptoRng, RngCore};
 use serde::de::{Error as SerdeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::convert::TryFrom;
+
 use std::fmt::{self, Formatter};
 use std::time;
 use thiserror::Error;
@@ -130,7 +130,7 @@ impl ReplySurb {
         self.encryption_key
             .to_bytes()
             .into_iter()
-            .chain(self.surb.to_bytes().into_iter())
+            .chain(self.surb.to_bytes())
             .collect()
     }
 

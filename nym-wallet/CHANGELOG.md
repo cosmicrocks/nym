@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [v1.2.10] (2023-10-31)
+
+- Add loading model on initial load of delegations ([#4039])
+- remove any whitespace from input field when bonding host ([#4062])
+
+[#4039]: https://github.com/nymtech/nym/pull/4039
+[#4062]: https://github.com/nymtech/nym/pull/4062
+
+## [v1.2.9] (2023-10-10)
+
+- Wallet: Introduce edit account name ([#3895])
+
+[#3895]: https://github.com/nymtech/nym/pull/3895
+
+## [v1.2.8] (2023-08-23)
+
+- [hotfix]: don't assign invalid fields when crossing the JS boundary ([#3805])
+
+[#3805]: https://github.com/nymtech/nym/pull/3805
+
+## [1.2.7] (2023-08-17)
+- release due to schema changes in the contract
+
 ## [v1.2.6] (2023-07-18)
 
 - [wallet] bugfix: don't send funds for pledge decrease simulation ([#3676])

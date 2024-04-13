@@ -1,16 +1,15 @@
-name: CD docs
+name: cd-docs
 
 on:
-  push:
-    branches: master
-    paths:
-      - 'documentation/docs/**'
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: custom-runner-linux
+    runs-on: ubuntu-20.04-16-core
     steps:
       - uses: actions/checkout@v3
+      - name: Install Dependencies (Linux)
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl wget libssl-dev libudev-dev squashfs-tools protobuf-compiler
       - name: Install rsync
         run: sudo apt-get install rsync
       - uses: rlespinasse/github-slug-action@v3.x
@@ -25,41 +24,63 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: build
-          args: --workspace --release --all
-      - name: Install mdbook
-        run: (test -x $HOME/.cargo/bin/mdbook || cargo install --vers "^0.4" mdbook)
-      - name: Install mdbook plugins
-        run: |
-          cargo install --vers "^0.2.0" mdbook-variables && cargo install \
-            --vers "^1.8.0" mdbook-admonish && cargo install --vers \
-            "^0.1.2" mdbook-last-changed && cargo install --vers "^0.1.2" \
-            mdbook-theme && cargo install --vers "^0.7.7" mdbook-linkcheck && \
-            cargo install --vers "^0.5.0" mdbook-cmdrun
-      - name: Clean website
-        run: cd documentation/docs && mdbook clean
-      - name: Build website
-        run: cd documentation/docs && mdbook build
-      - name: Deploy branch master to dev
-        continue-on-error: true
-        uses: easingthemes/ssh-deploy@main
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.CD_WWW_SSH_PRIVATE_KEY }}
-          ARGS: "-rltgoDzvO --delete"
-          SOURCE: "documentation/docs/book/"
-          REMOTE_HOST: ${{ secrets.CD_WWW_REMOTE_HOST_DEV }}
-          REMOTE_USER: ${{ secrets.CD_WWW_REMOTE_USER }}
-          TARGET: ${{ secrets.CD_WWW_REMOTE_TARGET }}/
-          EXCLUDE: "/dist/, /node_modules/"
-      - name: Deploy branch master to prod
-        uses: easingthemes/ssh-deploy@main
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.CD_WWW_SSH_PRIVATE_KEY }}
-          ARGS: "-rltgoDzvO --delete"
-          SOURCE: "documentation/docs/book/"
-          REMOTE_HOST: ${{ secrets.CD_WWW_REMOTE_HOST_PROD }}
-          REMOTE_USER: ${{ secrets.CD_WWW_REMOTE_USER }}
-          TARGET: ${{ secrets.CD_WWW_REMOTE_TARGET }}/
-          EXCLUDE: "/dist/, /node_modules/"
+          args: --workspace --release
+      - name: Install mdbook and plugins
+        run: cd documentation && ./install_mdbook_deps.sh
+      - name: Remove existing Nym config directory (`~/.nym/`)
+        run: cd documentation && ./remove_existing_config.sh
+        continue-on-error: false
+      - name: Build all projects in documentation/ & move to ~/dist/docs/
+        run: cd documentation && ./build_all_to_dist.sh
+        continue-on-error: false
+
+      - name: Post process
+        run: cd documentation && ./post_process.sh
+        continue-on-error: false
+
+      - name: Create Vercel project file
+        uses: mobiledevops/secret-to-file-action@v1
+        with:
+          base64-encoded-secret: ${{ secrets.VERCEL_PROJECT_JSON_BASE64 }}
+          filename: "project.json"
+          is-executable: true
+          working-directory: "./dist/docs/.vercel"
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+        continue-on-error: false
+
+      - name: Pull Vercel Environment Information (preview)
+        if: github.ref != 'refs/heads/master'
+        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: dist/docs
+      - name: Pull Vercel Environment Information (production)
+        if: github.ref == 'refs/heads/master'
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: dist/docs
+        continue-on-error: false
+
+      - name: Build Project Artifacts (preview)
+        if: github.ref != 'refs/heads/master'
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: dist/docs
+        continue-on-error: false
+      - name: Build Project Artifacts (production)
+        if: github.ref == 'refs/heads/master'
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: dist/docs
+        continue-on-error: false
+
+      - name: Deploy Project Artifacts to Vercel (preview)
+        if: github.ref != 'refs/heads/master'
+        run: vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: dist/docs
+      - name: Deploy Project Artifacts to Vercel (master)
+        if: github.ref == 'refs/heads/master'
+        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: dist/docs
+        continue-on-error: false
+
       - name: Matrix - Node Install
         run: npm install
         working-directory: .github/workflows/support-files

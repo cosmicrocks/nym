@@ -1,32 +1,61 @@
-// Copyright 2021 - Nym Technologies SA <contact@nymtech.net>
+// Copyright 2022-2024 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::types::{ContractSafeBytes, EncodedBTEPublicKeyWithProof, EpochId, TimeConfiguration};
+use crate::dealing::{DealingChunkInfo, PartialContractDealing};
+use crate::types::{
+    ChunkIndex, DealingIndex, EncodedBTEPublicKeyWithProof, EpochId, TimeConfiguration,
+};
 use crate::verification_key::VerificationKeyShare;
-use cosmwasm_std::Addr;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use contracts_common::IdentityKey;
+use cosmwasm_schema::cw_serde;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[cfg(feature = "schema")]
+use crate::{
+    dealer::{
+        DealerDetailsResponse, PagedDealerIndexResponse, PagedDealerResponse,
+        RegisteredDealerDetails,
+    },
+    dealing::{
+        DealerDealingsStatusResponse, DealingChunkResponse, DealingChunkStatusResponse,
+        DealingMetadataResponse, DealingStatusResponse,
+    },
+    types::{Epoch, State, StateAdvanceResponse},
+    verification_key::{PagedVKSharesResponse, VkShareResponse},
+};
+#[cfg(feature = "schema")]
+use cosmwasm_schema::QueryResponses;
+
+#[cw_serde]
 pub struct InstantiateMsg {
     pub group_addr: String,
     pub multisig_addr: String,
     pub time_configuration: Option<TimeConfiguration>,
     pub mix_denom: String,
+
+    /// Specifies the number of elements in the derived keys
+    pub key_size: u32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
 pub enum ExecuteMsg {
+    // we could have just re-used AdvanceEpochState, but imo an explicit message is better
+    InitiateDkg {},
+
     RegisterDealer {
         bte_key_with_proof: EncodedBTEPublicKeyWithProof,
+        identity_key: IdentityKey,
         announce_address: String,
         resharing: bool,
     },
 
-    CommitDealing {
-        dealing_bytes: ContractSafeBytes,
+    CommitDealingsMetadata {
+        dealing_index: DealingIndex,
+        chunks: Vec<DealingChunkInfo>,
         resharing: bool,
+    },
+
+    CommitDealingsChunk {
+        chunk: PartialContractDealing,
     },
 
     CommitVerificationKeyShare {
@@ -35,44 +64,101 @@ pub enum ExecuteMsg {
     },
 
     VerifyVerificationKeyShare {
-        owner: Addr,
+        owner: String,
         resharing: bool,
     },
 
-    SurpassedThreshold {},
-
     AdvanceEpochState {},
+
+    TriggerReset {},
+
+    TriggerResharing {},
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
+#[cfg_attr(feature = "schema", derive(QueryResponses))]
 pub enum QueryMsg {
+    #[cfg_attr(feature = "schema", returns(State))]
+    GetState {},
+
+    #[cfg_attr(feature = "schema", returns(Epoch))]
     GetCurrentEpochState {},
+
+    #[cfg_attr(feature = "schema", returns(u64))]
     GetCurrentEpochThreshold {},
-    GetInitialDealers {},
-    GetDealerDetails {
+
+    #[cfg_attr(feature = "schema", returns(StateAdvanceResponse))]
+    CanAdvanceState {},
+
+    #[cfg_attr(feature = "schema", returns(RegisteredDealerDetails))]
+    GetRegisteredDealer {
         dealer_address: String,
+        epoch_id: Option<EpochId>,
     },
+
+    #[cfg_attr(feature = "schema", returns(DealerDetailsResponse))]
+    GetDealerDetails { dealer_address: String },
+
+    #[cfg_attr(feature = "schema", returns(PagedDealerResponse))]
     GetCurrentDealers {
         limit: Option<u32>,
         start_after: Option<String>,
     },
-    GetPastDealers {
+
+    #[cfg_attr(feature = "schema", returns(PagedDealerIndexResponse))]
+    GetDealerIndices {
         limit: Option<u32>,
         start_after: Option<String>,
     },
-    GetDealing {
-        idx: u64,
-        limit: Option<u32>,
-        start_after: Option<String>,
+
+    #[cfg_attr(feature = "schema", returns(DealingMetadataResponse))]
+    GetDealingsMetadata {
+        epoch_id: EpochId,
+        dealer: String,
+        dealing_index: DealingIndex,
     },
+
+    #[cfg_attr(feature = "schema", returns(DealerDealingsStatusResponse))]
+    GetDealerDealingsStatus { epoch_id: EpochId, dealer: String },
+
+    #[cfg_attr(feature = "schema", returns(DealingStatusResponse))]
+    GetDealingStatus {
+        epoch_id: EpochId,
+        dealer: String,
+        dealing_index: DealingIndex,
+    },
+
+    #[cfg_attr(feature = "schema", returns(DealingChunkStatusResponse))]
+    GetDealingChunkStatus {
+        epoch_id: EpochId,
+        dealer: String,
+        dealing_index: DealingIndex,
+        chunk_index: ChunkIndex,
+    },
+
+    #[cfg_attr(feature = "schema", returns(DealingChunkResponse))]
+    GetDealingChunk {
+        epoch_id: EpochId,
+        dealer: String,
+        dealing_index: DealingIndex,
+        chunk_index: ChunkIndex,
+    },
+
+    #[cfg_attr(feature = "schema", returns(VkShareResponse))]
+    GetVerificationKey { epoch_id: EpochId, owner: String },
+
+    #[cfg_attr(feature = "schema", returns(PagedVKSharesResponse))]
     GetVerificationKeys {
         epoch_id: EpochId,
         limit: Option<u32>,
         start_after: Option<String>,
     },
+
+    /// Gets the stored contract version information that's required by the CW2 spec interface for migrations.
+    #[serde(rename = "get_cw2_contract_version")]
+    #[cfg_attr(feature = "schema", returns(cw2::ContractVersion))]
+    GetCW2ContractVersion {},
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
 pub struct MigrateMsg {}

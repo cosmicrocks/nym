@@ -5,16 +5,22 @@ use crate::config::persistence::NymConnectPaths;
 use crate::config::template::CONFIG_TEMPLATE;
 use crate::config::upgrade::try_upgrade_config;
 use crate::error::{BackendError, Result};
-use nym_client_core::client::base_client::storage::gateway_details::OnDiskGatewayDetails;
+use nym_client_core::client::base_client::non_wasm_helpers::setup_fs_gateways_storage;
+use nym_client_core::client::base_client::storage::gateways_storage::{
+    GatewayDetails, RemoteGatewayDetails,
+};
 use nym_client_core::client::key_manager::persistence::OnDiskKeys;
-use nym_client_core::config::GatewayEndpointConfig;
-use nym_client_core::init::GatewaySetup;
+use nym_client_core::error::ClientCoreError;
+use nym_client_core::init::generate_new_client_keys;
+use nym_client_core::init::helpers::current_gateways;
+use nym_client_core::init::types::{GatewaySelectionSpecification, GatewaySetup};
 use nym_config::{
     must_get_home, read_config_from_toml_file, save_formatted_config_to_file, NymConfigTemplate,
     DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILENAME, DEFAULT_DATA_DIR, NYM_DIR,
 };
 use nym_crypto::asymmetric::identity;
 use nym_socks5_client_core::config::Config as Socks5CoreConfig;
+use rand_07::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -23,13 +29,14 @@ use tap::TapFallible;
 mod old_config_v1_1_13;
 mod old_config_v1_1_20;
 mod old_config_v1_1_20_2;
+mod old_config_v1_1_30;
+mod old_config_v1_1_33;
 mod persistence;
 mod template;
 mod upgrade;
 mod user_data;
 
-pub use user_data::PrivacyLevel;
-pub use user_data::UserData;
+pub use user_data::*;
 
 static SOCKS5_CONFIG_ID: &str = "nym-connect";
 
@@ -70,7 +77,7 @@ pub struct Config {
 }
 
 impl NymConfigTemplate for Config {
-    fn template() -> &'static str {
+    fn template(&self) -> &'static str {
         CONFIG_TEMPLATE
     }
 }
@@ -138,6 +145,17 @@ fn init_paths(id: &str) -> io::Result<()> {
     fs::create_dir_all(default_config_directory(id))
 }
 
+fn try_extract_version_for_upgrade_failure(err: BackendError) -> Option<String> {
+    if let BackendError::ClientCoreError {
+        source: ClientCoreError::UnableToUpgradeConfigFile { new_version },
+    } = err
+    {
+        Some(new_version)
+    } else {
+        None
+    }
+}
+
 pub async fn init_socks5_config(provider_address: String, chosen_gateway_id: String) -> Result<()> {
     log::trace!("Initialising client...");
 
@@ -146,10 +164,26 @@ pub async fn init_socks5_config(provider_address: String, chosen_gateway_id: Str
     let _validated = identity::PublicKey::from_base58_string(&chosen_gateway_id)
         .map_err(|_| BackendError::UnableToParseGateway)?;
 
-    let already_init = if default_config_filepath(&id).exists() {
+    let config_path = default_config_filepath(&id);
+    let already_init = if config_path.exists() {
         // in case we're using old config, try to upgrade it
         // (if we're using the current version, it's a no-op)
-        try_upgrade_config(&id)?;
+        if let Err(err) = try_upgrade_config(&id).await {
+            log::error!(
+                "Failed to upgrade config file {}: {err}",
+                config_path.display(),
+            );
+            return if let Some(failed_at_version) = try_extract_version_for_upgrade_failure(err) {
+                Err(
+                    BackendError::CouldNotUpgradeExistingConfigurationFileAtVersion {
+                        file: config_path,
+                        failed_at_version,
+                    },
+                )
+            } else {
+                Err(BackendError::CouldNotUpgradeExistingConfigurationFile { file: config_path })
+            };
+        };
         eprintln!("SOCKS5 client \"{id}\" was already initialised before");
         true
     } else {
@@ -157,13 +191,8 @@ pub async fn init_socks5_config(provider_address: String, chosen_gateway_id: Str
         false
     };
 
-    // Future proofing. This flag exists for the other clients
-    let user_wants_force_register = false;
-
-    // If the client was already initialized, don't generate new keys and don't re-register with
-    // the gateway (because this would create a new shared key).
-    // Unless the user really wants to.
-    let register_gateway = !already_init || user_wants_force_register;
+    // // Future proofing. This flag exists for the other clients
+    // let user_wants_force_register = false;
 
     log::trace!("Creating config for id: {id}");
     let mut config = Config::new(&id, &provider_address);
@@ -172,43 +201,58 @@ pub async fn init_socks5_config(provider_address: String, chosen_gateway_id: Str
         config.core.base.client.nym_api_urls = nym_config::parse_urls(&raw_validators);
     }
 
-    let gateway_setup = if register_gateway {
-        GatewaySetup::new_fresh(Some(chosen_gateway_id), None)
-    } else {
-        GatewaySetup::MustLoad
-    };
-
-    // Setup gateway by either registering a new one, or reusing exiting keys
     let key_store = OnDiskKeys::new(config.storage_paths.common_paths.keys.clone());
     let details_store =
-        OnDiskGatewayDetails::new(&config.storage_paths.common_paths.gateway_details);
-    let init_details = nym_client_core::init::setup_gateway(
-        &gateway_setup,
-        &key_store,
-        &details_store,
-        register_gateway,
-        Some(&config.core.base.client.nym_api_urls),
-    )
-    .await?;
+        setup_fs_gateways_storage(&config.storage_paths.common_paths.gateway_registrations).await?;
+
+    // if this is a first time client with this particular id is initialised, generated long-term keys
+    if !already_init {
+        let mut rng = OsRng;
+        generate_new_client_keys(&mut rng, &key_store).await?;
+    }
+
+    let gateway_setup = if !already_init {
+        let selection_spec =
+            GatewaySelectionSpecification::new(Some(chosen_gateway_id), None, false);
+        let mut rng = rand_07::thread_rng();
+        let available_gateways =
+            current_gateways(&mut rng, &config.core.base.client.nym_api_urls).await?;
+        GatewaySetup::New {
+            specification: selection_spec,
+            available_gateways,
+            wg_tun_address: None,
+        }
+    } else {
+        GatewaySetup::MustLoad {
+            gateway_id: Some(chosen_gateway_id),
+        }
+    };
+
+    let init_details =
+        nym_client_core::init::setup_gateway(gateway_setup, &key_store, &details_store).await?;
+
+    let GatewayDetails::Remote(gateway_details) = &init_details.gateway_registration.details else {
+        return Err(ClientCoreError::UnexpectedPersistedCustomGatewayDetails)?;
+    };
 
     config.save_to_default_location().tap_err(|_| {
         log::error!("Failed to save the config file");
     })?;
 
-    print_saved_config(&config, &init_details.gateway_details);
+    print_saved_config(&config, gateway_details);
 
-    let address = init_details.client_address()?;
+    let address = init_details.client_address();
     log::info!("The address of this client is: {address}");
     Ok(())
 }
 
-fn print_saved_config(config: &Config, gateway_details: &GatewayEndpointConfig) {
+fn print_saved_config(config: &Config, gateway_details: &RemoteGatewayDetails) {
     log::info!(
         "Saved configuration file to {}",
         config.default_location().display()
     );
     log::info!("Gateway id: {}", gateway_details.gateway_id);
-    log::info!("Gateway owner: {}", gateway_details.gateway_owner);
+    log::info!("Gateway owner: {}", gateway_details.gateway_owner_address);
     log::info!("Gateway listener: {}", gateway_details.gateway_listener);
     log::info!(
         "Service provider address: {}",
@@ -216,7 +260,7 @@ fn print_saved_config(config: &Config, gateway_details: &GatewayEndpointConfig) 
     );
     log::info!(
         "Service provider port: {}",
-        config.core.socks5.listening_port
+        config.core.socks5.bind_address.port()
     );
     log::info!("Client configuration completed.");
 }
