@@ -39,7 +39,7 @@ COPY . .
 RUN make build-release
 
 # Stage 2: Final stage
-FROM debian:buster-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y libssl-dev ca-certificates && \
