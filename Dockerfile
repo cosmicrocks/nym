@@ -27,7 +27,7 @@ RUN rustup component add clippy
 RUN rustup component add rustfmt
 
 # Add the wasm-opt tool for optimizing the WASM binaries
-RUN cargo install --version 0.112.0 wasm-opt
+RUN cargo install --version 0.116.1 wasm-opt
 
 # Set working directory to /usr/src
 WORKDIR /usr/src
