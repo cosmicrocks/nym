@@ -47,6 +47,7 @@ RUN apt-get update && \
 
 #copy the compiled binaries from the builder stage
 COPY --from=builder /usr/src/target/release/nym-client /usr/bin/nym-client
+COPY --from=builder /usr/src/target/release/nym-node /usr/bin/nym-node
 COPY --from=builder /usr/src/target/release/nym-gateway /usr/bin/nym-gateway
 COPY --from=builder /usr/src/target/release/nym-mixnode /usr/bin/nym-mixnode
 COPY --from=builder /usr/src/target/release/nym-socks5-client /usr/bin/nym-socks5-client
